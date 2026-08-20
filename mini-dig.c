@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <sys/time.h>
+#include <stdint.h>
 
 enum query_type {
   A,
@@ -19,7 +20,7 @@ struct config {
     enum query_type type;
 };
 
-// Выводит мини гайд на мини пиг
+// Выводит mini guide на mini pig
 void print_guide(){
       printf("Запуск утилиты выглядит так:\n");
       printf("mini-dig <server> <domain> <type>.\n");
@@ -30,9 +31,10 @@ void print_guide(){
       printf("mini-dig @1.1.1.1 example.com A\n");
 }
 
-// Превращает domain из одной строки в формат для dns
-void encode_domain(uint8_t *buffer, size_t *pos, const char *domain) {
-
+// Считывает domain name из буфера с полученным dns сообщением
+// Принимает указатель на указатель, чтобы иметь возможность его изменить (этот указатель используется для перемещения по буферу)
+void parse_name(uint8_t *buffer, uint8_t **p) {
+  
 }
 
 // argv - указатель на первый элемент массива указателей на строки - массив строк (аргументы командой строки - строки)
@@ -52,7 +54,7 @@ int main(int argc, char **argv) {
       printf("Для отправки DNS-запроса выбран DNS-сервер системы.\n");
       config.server = NULL;
     }
-    else if ((argv[1][0] == '@')) {
+    else if (argv[1][0] == '@') {
       if (argv[1][1] == '\0') {
         print_guide();
         return EXIT_FAILURE;
@@ -133,6 +135,8 @@ int main(int argc, char **argv) {
     // Собираю DNS сообщение вручную. Размер ограничен 512 байтами для dns поверх udp
     uint8_t send_buffer[512];
     size_t pos = 0; // текущая позиция
+    uint16_t send_transaction_id = 0x1234; //для сравнения с ID DNS-ответа
+    
     send_buffer[pos++] = 0x12; // Transaction ID (позже будет генерироваться случайно)
     send_buffer[pos++] = 0x34;
     send_buffer[pos++] = 0b00000001; // query, recursion desired
@@ -219,13 +223,41 @@ int main(int argc, char **argv) {
       perror("Error: Не удалось получить датаграммку. recvfrom().\n");
       return EXIT_FAILURE; 
     }    
-    printf("DNS-ответ получен: %zd байтов\n", result_of_call);
+    printf("DNS-ответ получен: %zd байт\n", result_of_call);
     
     // Записываю поле ID транзакции в 2-х байтовую переменную
     uint16_t id = ((uint16_t)recieve_buffer[0] << 8) | recieve_buffer[1]; // Сдвигаю первый байт на 8 разрядов влево, а второй байт приравниваю второму байту буфера получения
-  
-  
-  
+    if (id != send_transaction_id) {
+      printf("Полученный DNS-ответ содержит ID-транзакции отличный от отправленного DNS-запроса: %u (был отправлен ID = %u)!\n", (unsigned int)id, (unsigned int)send_transaction_id);
+    }
+
+    
+    uint16_t recv_qdcount = ((uint16_t)recieve_buffer[4] << 8) | recieve_buffer[5]; 
+    uint16_t recv_ancount = ((uint16_t)recieve_buffer[6] << 8) | recieve_buffer[7]; 
+    uint16_t recv_nscount = ((uint16_t)recieve_buffer[8] << 8) | recieve_buffer[9]; 
+    uint16_t recv_arcount = ((uint16_t)recieve_buffer[10] << 8) | recieve_buffer[11]; 
+    printf("Количество resource records в секциях: QDCOUNT = %u, ANCOUNT = %u, NSCOUNT = %u, ARCOUNT = %u. \n", (unsigned int)recv_qdcount, (unsigned int)recv_ancount, (unsigned int)recv_nscount, (unsigned int)recv_arcount);
+    uint8_t label_len;
+    if (recv_qdcount != 1) {
+      printf("Ух-ты, количество записей QDCOUNT отличается от единицы! Сравните имена запросов с теми, что вводили вы:\n");;
+      p = &recieve_buffer[12];
+      for (int i = recv_qdcount; i != 0; i--) {
+        while (*p != 0) {
+          label_len = *p;
+          p++;
+          while (label_len != 0){
+            putchar(*p);
+            label_len--;
+            p++;
+          }
+          putchar('.');
+        }
+        p += 5; // Пропуск байта 0, которым заканчивается query name и полей query type и query class (по 2 байта каждое)
+        printf("\n");  
+      }   
+    }
+    
+
     return 0;
 }
 
