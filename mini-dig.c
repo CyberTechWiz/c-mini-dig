@@ -30,6 +30,7 @@ void print_guide(){
       printf("<type> - тип запроса: А - запрос IPv4 адреса для domain или АААА - запрос IPv6 адреса для domain. Поставьте дефис чтобы был выбран A.\n");
       printf("Пример запуска:\n");
       printf("mini-dig @1.1.1.1 example.com A\n");
+      printf("(Программа может обработать compression label на весь domain name, Но в случае мешанины из data label и compression label будет выведен некорретный domain name).\n");
 }
 
 // Считывает domain name из буфера с полученным dns сообщением
@@ -64,7 +65,7 @@ void parse_name(uint8_t *buffer, uint8_t **p) {
   }
   (*p)++; // Пропускаю завершающий 0
   if (compressed) {
-    *p = name_start + 2; // Пропускаю 1 байт compression label
+    *p = name_start + 2; // Пропускаю 2 байта compression label
   } 
 }
 
@@ -142,8 +143,11 @@ int main(int argc, char **argv) {
     timeout.tv_usec = 0;
 
     // Настраиваю сокет, чтобы у него появился таймаут. level is specified as SOL_SOCKET. The  arguments optval and optlen are used to access option values for setsockopt(). Optname and any specified options are passed uninterpreted to the appropriate protocol module for interpretation.
-    ssize_t result_of_call = setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    if (result_of_call == -1) {
+    // ssize_t, так как recvfrom() возвращает этот тип данных
+    int result_of_call_int; // Будет принимать возвращаемое значение функциями
+    ssize_t result_of_call_bytes_ssize_t; // Будет принимать возвращаемое значение функциями
+    result_of_call_int = setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    if (result_of_call_int == -1) {
       perror("Error: Не удалось модифицировать сокет для таймаута, setsockopt().\n");
       return EXIT_FAILURE; 
     }
@@ -160,6 +164,7 @@ int main(int argc, char **argv) {
     // inet_aton преобразует строку с адресом в сетевой формат и сохраняет результат в структуре типа in_addr
     if (inet_aton(config.server, &server_addr.sin_addr) != 1) { //htonl переводит long в Big-Endian, но для 0.0.0.0 это необязатьно
       fprintf(stderr, "Error: invalid DNS server address.\n");
+      return EXIT_FAILURE;
     } 
     
 
@@ -231,30 +236,36 @@ int main(int argc, char **argv) {
     send_buffer[pos++] = 1;
 
     // Отправка dns запроса (см. man sendto)
-    result_of_call = sendto(sock_fd, send_buffer, pos, 0, (struct sockaddr *) &server_addr, sizeof(server_addr));
-    if (result_of_call == -1){  
+    result_of_call_bytes_ssize_t = sendto(sock_fd, send_buffer, pos, 0, (struct sockaddr *) &server_addr, sizeof(server_addr));
+    if (result_of_call_bytes_ssize_t == -1){  
       perror("Error: Сообщение не отправлено. sendto().\n");
       return EXIT_FAILURE; 
     }
-    if (result_of_call < pos){  
+    if (result_of_call_bytes_ssize_t < pos){  
       printf("Отправлено меньше байт, чем сформировано.\n");
     }
-    if (result_of_call > pos){  
+    if (result_of_call_bytes_ssize_t > pos){  
       printf("Отправлено больше байт, чем сформировано.\n");
     }
-    if (result_of_call == pos){  
+    if (result_of_call_bytes_ssize_t == pos){  
       printf("DNS-сообщение отправлено успешно.\n");
     }
 
     uint8_t recieve_buffer[512];
     socklen_t addr_len = sizeof(server_addr);
     // Получение ответа
-    result_of_call = recvfrom(sock_fd, recieve_buffer, 512, 0, (struct sockaddr *) &server_addr, &addr_len);
-    if (result_of_call == -1){  
+    result_of_call_bytes_ssize_t = recvfrom(sock_fd, recieve_buffer, 512, 0, (struct sockaddr *) &server_addr, &addr_len);
+    if (result_of_call_bytes_ssize_t == -1){  
       perror("Error: Не удалось получить датаграммку. recvfrom().\n");
       return EXIT_FAILURE; 
-    }    
-    printf("DNS-ответ получен: %zd байт\n", result_of_call);
+    }  
+    
+    if (result_of_call_bytes_ssize_t < 12){  
+      perror("Error: DNS-сообщение оказалось короче 12 байт (У DNS-сообщений фиксированный заголовок размером 12 байт). recvfrom().\n");
+      return EXIT_FAILURE; 
+    }  
+    
+    printf("DNS-ответ получен: %zd байт\n", result_of_call_bytes_ssize_t);
     
     // Записываю поле ID транзакции в 2-х байтовую переменную
     uint16_t id = ((uint16_t)recieve_buffer[0] << 8) | recieve_buffer[1]; // Сдвигаю первый байт на 8 разрядов влево, а второй байт приравниваю второму байту буфера получения
@@ -262,26 +273,124 @@ int main(int argc, char **argv) {
       printf("Полученный DNS-ответ содержит ID-транзакции отличный от отправленного DNS-запроса: %u (был отправлен ID = %u)!\n", (unsigned int)id, (unsigned int)send_transaction_id);
     }
 
-    
+    // Разбор флагов сделать сложнее, он будет реализован позже
+
     uint16_t recv_qdcount = ((uint16_t)recieve_buffer[4] << 8) | recieve_buffer[5]; 
     uint16_t recv_ancount = ((uint16_t)recieve_buffer[6] << 8) | recieve_buffer[7]; 
     uint16_t recv_nscount = ((uint16_t)recieve_buffer[8] << 8) | recieve_buffer[9]; 
     uint16_t recv_arcount = ((uint16_t)recieve_buffer[10] << 8) | recieve_buffer[11]; 
     printf("Количество resource records в секциях: QDCOUNT = %u, ANCOUNT = %u, NSCOUNT = %u, ARCOUNT = %u. \n", (unsigned int)recv_qdcount, (unsigned int)recv_ancount, (unsigned int)recv_nscount, (unsigned int)recv_arcount);
-    if (recv_qdcount != 1) {
+    p = &recieve_buffer[12]; // p указывает на начало первой секции
+    if (recv_qdcount < 1) {
+      printf("Записей в секции Question нет\n");
+    }
+    else if (recv_qdcount != 1) {
       printf("Ух-ты, количество записей QDCOUNT отличается от единицы! Сравните имена запросов с теми, что вводили вы:\n");;
-      p = &recieve_buffer[12];
+    } 
+    printf("Секция Question: \n");
       for (int i = recv_qdcount; i != 0; i--) {
         parse_name(recieve_buffer, &p); // recieve_buffer - адрес первого байта буфера, &p - адрес переменной-указателя
         p += 4; // Пропуск полей query type и query class (по 2 байта каждое)
         printf("\n");  
       }   
-    }
-    for (int i = recv_ancount; i != 0; i--) {
-      
-    }
     
-
+    // p указывает на начало секции answer
+    uint16_t recv_rr_type; // Хранит тип rr полученного dns-сообщения
+    uint16_t recv_rr_class; // Хранит класс
+    uint32_t recv_rr_ttl;
+    uint16_t recv_rr_rdlength;
+    uint16_t presumed_recv_rr_rdlength = 0;
+    char data[INET6_ADDRSTRLEN];
+    if (recv_ancount < 1) {
+      printf("Записей в секции Answer нет :(\n");
+    }
+    else {
+    printf("Секция Answer: \n");
+    for (int i = recv_ancount; i != 0; i--) {
+      // Снова читаю и вывожу доменные имена 
+      parse_name(recieve_buffer, &p);
+      // p указывает на начало поля Type
+      recv_rr_type = ((uint16_t)(p[0]) << 8) | p[1];
+      switch (recv_rr_type)
+      {
+      case 1:
+        // В поле RDLENGTH будет значение 4
+        printf("\nA: RR type is address record for IPv4. RDLENGHT должен быть равен 4 байтам\n");
+        presumed_recv_rr_rdlength = 4;
+        break;
+      case 28:
+        // В поле RDLENGTH будет значение 16
+        printf("\nAAAA: RR type is address record for IPv6. RDLENGHT должен быть равен 16 байтам\n");
+        presumed_recv_rr_rdlength = 16;
+        break;
+      default:
+        printf("\nТип RR нераспознан\n");
+        presumed_recv_rr_rdlength = 0;
+        break;
+      }
+      p += 2; // Смещаю указатель на 2 байта, так как поле Type пройдено
+      // p указывает на начало поля Class
+      recv_rr_class = ((uint16_t)(p[0]) << 8) | p[1];
+      switch (recv_rr_class)
+      {
+      case 1:
+        printf("A: RR class is Internet.\n");
+        break;
+      default:
+        printf("Класс RR нераспознан\n");
+        break;
+      }
+      p += 2;
+      // p указывает на начало поля TTL
+      // Поле TTL будет потолще, поэтому в uint16_t не влезет
+      recv_rr_ttl = ((uint32_t)(p[0]) << 24) | ((uint32_t)(p[1]) << 16) | ((uint32_t)(p[2]) << 8) | p[3];
+      printf("Запись будет храниться TTL = %u секунд.\n", (unsigned int)recv_rr_ttl);
+      p += 4;
+      // p указывает на начало поля RDLENGTH
+      recv_rr_rdlength = ((uint16_t)(p[0]) << 8) | p[1];
+      printf("Поле данных занимает RDLENGTH = %u байт.\n", (unsigned int)recv_rr_rdlength);
+      if (presumed_recv_rr_rdlength != 0 && presumed_recv_rr_rdlength != recv_rr_rdlength) {
+        printf("Поле данных занимает не столько байтов, сколько предполагалось на основе типа RR.\n");
+      }
+      p += 2;
+      // p указывает на начало поля RDATA
+      switch (recv_rr_type)
+      {
+      case 1:
+        if(inet_ntop(AF_INET, p, data, sizeof(data)) == NULL) {
+          printf("Ошибка перевода IPv4 адреса из сетевого в текстовый формат, inet_ntop().\n");
+        }
+        else {
+          printf("Получен IPv4-адрес: %s\n", data);
+        }
+        break;
+      case 28:
+        if(inet_ntop(AF_INET6, p, data, sizeof(data)) == NULL) {
+          printf("Ошибка перевода IPv6 адреса из сетевого в текстовый формат, inet_ntop().\n");
+        }
+        else {
+          printf("Получен IPv6-адрес: %s\n", data);
+        }
+        break;
+      default:
+        printf("\nДанные записи не будут выведены, так как тип RR нераспознан\n");
+        printf("\n\nШутка. Вот сие нечто:\n");
+        for (uint16_t i = 0; i < recv_rr_rdlength; i++) {
+          printf("%02x ", p[i]);
+        }
+        printf("\n");
+        break;
+      }
+      printf("\n");
+      p += recv_rr_rdlength;
+    }
+    }
+    if (recv_nscount < 1) {
+      printf("Записей в секции Authority нет :(\n");
+    }
+    if (recv_arcount < 1) {
+      printf("Записей в секции Additional Information нет :(\n");
+    }
     return 0;
 }
 
