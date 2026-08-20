@@ -87,7 +87,8 @@ void parse_name(uint8_t *buffer, uint8_t **p) {
 
 // argv - указатель на первый элемент массива указателей на строки - массив строк (аргументы командой строки - строки)
 int main(int argc, char **argv) {
-
+    printf("\n");
+    
     struct config config;
 
     if (argc != 4){
@@ -145,7 +146,7 @@ int main(int argc, char **argv) {
 
     // Создаю сокет
     // Socket function returns a file descriptor (sockfd)
-    // AF_INET - IPv4 protocol family, datagram - stream socket type, 0 - system's default protocol augment.
+    // AF_INET - IPv4 protocol family, datagram - stream socket type, 0 - system's default protocol augment
     int sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock_fd < 0) {
       perror("Error: Ошибка создания сокета :( socket().\n");
@@ -252,8 +253,9 @@ int main(int argc, char **argv) {
     send_buffer[pos++] = 1;
 
     // Отладочная информация
-    printf("Generated send buffer: \n");
+    printf("\nGenerated send buffer: \n");
     hex_dump(send_buffer, pos);
+    printf("\n");
 
     // Отправка dns запроса (см. man sendto)
     result_of_call_bytes_ssize_t = sendto(sock_fd, send_buffer, pos, 0, (struct sockaddr *) &server_addr, sizeof(server_addr));
@@ -270,7 +272,7 @@ int main(int argc, char **argv) {
     if (result_of_call_bytes_ssize_t == pos){  
       printf("DNS-сообщение отправлено успешно.\n");
     }
-
+    
     uint8_t recieve_buffer[512];
     socklen_t addr_len = sizeof(server_addr);
     // Получение ответа
@@ -285,10 +287,11 @@ int main(int argc, char **argv) {
       return EXIT_FAILURE; 
     }  
     
-    printf("DNS-ответ получен: %zd байт\n", result_of_call_bytes_ssize_t);
+    printf("\nDNS-ответ получен: %zd байт\n", result_of_call_bytes_ssize_t);
     
-    printf("Received buffer: \n");
+    printf("\nReceived buffer: \n");
     hex_dump(recieve_buffer, result_of_call_bytes_ssize_t);
+    printf("\n");
 
     // Записываю поле ID транзакции в 2-х байтовую переменную
     uint16_t id = ((uint16_t)recieve_buffer[0] << 8) | recieve_buffer[1]; // Сдвигаю первый байт на 8 разрядов влево, а второй байт приравниваю второму байту буфера получения
@@ -302,7 +305,7 @@ int main(int argc, char **argv) {
     uint16_t recv_ancount = ((uint16_t)recieve_buffer[6] << 8) | recieve_buffer[7]; 
     uint16_t recv_nscount = ((uint16_t)recieve_buffer[8] << 8) | recieve_buffer[9]; 
     uint16_t recv_arcount = ((uint16_t)recieve_buffer[10] << 8) | recieve_buffer[11]; 
-    printf("Количество resource records в секциях: QDCOUNT = %u, ANCOUNT = %u, NSCOUNT = %u, ARCOUNT = %u. \n", (unsigned int)recv_qdcount, (unsigned int)recv_ancount, (unsigned int)recv_nscount, (unsigned int)recv_arcount);
+    printf("Количество resource records в секциях: QDCOUNT = %u, ANCOUNT = %u, NSCOUNT = %u, ARCOUNT = %u. \n\n", (unsigned int)recv_qdcount, (unsigned int)recv_ancount, (unsigned int)recv_nscount, (unsigned int)recv_arcount);
     uint8_t *recv_p = &recieve_buffer[12]; // recv_p указывает на начало первой секции
     if (recv_qdcount < 1) {
       printf("Записей в секции Question нет\n");
@@ -310,7 +313,7 @@ int main(int argc, char **argv) {
     else if (recv_qdcount != 1) {
       printf("Ух-ты, количество записей QDCOUNT отличается от единицы! Сравните имена запросов с теми, что вводили вы:\n");;
     } 
-    printf("Секция Question: \n");
+    printf("\nСекция Question: \n");
       for (int i = recv_qdcount; i != 0; i--) {
         parse_name(recieve_buffer, &recv_p); // recieve_buffer - адрес первого байта буфера, &recv_p - адрес переменной-указателя
         recv_p += 4; // Пропуск полей query type и query class (по 2 байта каждое)
@@ -328,7 +331,7 @@ int main(int argc, char **argv) {
       printf("Записей в секции Answer нет :(\n");
     }
     else {
-    printf("Секция Answer: \n");
+    printf("\n\nСекция Answer: \n");
     for (int i = recv_ancount; i != 0; i--) {
       // Снова читаю и вывожу доменные имена 
       parse_name(recieve_buffer, &recv_p);
@@ -409,15 +412,17 @@ int main(int argc, char **argv) {
     }
     }
     if (recv_nscount < 1) {
-      printf("Записей в секции Authority нет :(\n");
+      printf("\n\nЗаписей в секции Authority нет.\n");
     }
     if (recv_arcount < 1) {
-      printf("Записей в секции Additional Information нет :(\n");
+      printf("\n\nЗаписей в секции Additional Information нет.\n");
     }
     
-    printf("\n\n\n Дамп для отладки:\n");
+    printf("\n\n\nДамп для отладки:\n");
+    printf("\n");
     printf("Generated send buffer: \n");
     hex_dump(send_buffer, pos);
+    printf("\n");
     printf("Received buffer: \n");
     hex_dump(recieve_buffer, result_of_call_bytes_ssize_t);
 
