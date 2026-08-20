@@ -1,4 +1,4 @@
-// gcc server.c -o server -pthread
+// gcc mini-dig.c -o mini-dig
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <sys/time.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 enum query_type {
   A,
@@ -32,9 +33,39 @@ void print_guide(){
 }
 
 // Считывает domain name из буфера с полученным dns сообщением
-// Принимает указатель на указатель, чтобы иметь возможность его изменить (этот указатель используется для перемещения по буферу)
+// Принимает указатель на указатель, чтобы иметь возможность изменить сам указатель (адрес) (этот указатель используется для перемещения по буферу)
 void parse_name(uint8_t *buffer, uint8_t **p) {
-  
+  uint8_t label_len; // Длина имени между точками
+  uint8_t *name_start = *p; // Пусть тут хранится прежнее значение указателя, так как перемещаясь по ссылке надо будет вернуться
+  uint16_t offset; // Будет хранить смещение в случае обнаружения ссылки
+  bool compressed = false; // Поможет понять, надо ли возвращать p на место для дальнейшего парсинга сообщения
+  if ((**p & 0xC0) == 0b11000000) { // 1100 0000b = 0Ch, установленные первые два бита - признак compression label
+    // **p - указатель на указатель. *p указывает на конкретный байт в массиве uint8_t[512]
+    /*
+    (*p)[0] - Указывает на первый байт ссылки, скорее всего это 192d
+    (*p)[1] - Указывает на смещение
+    ((*p)[0] & 0b00111111) - стираю служебные биты в первом байте
+    (uint16_t)((*p)[0] & 0x3F) - преобразую первый байт в тип uint16_t
+    ((uint16_t)((*p)[0] & 0x3F) << 8) - сдвигаю полученное число на 8 разрядов влева
+    ((uint16_t)((*p)[0] & 0x3F) << 8) | (*p)[1]; - особожденные 8 разрядов занимает второй байт смещения*/
+    offset = ((uint16_t)((*p)[0] & 0x3F) << 8) | (*p)[1];
+    compressed = true;
+    *p = buffer + offset;
+  }
+  while (**p != 0) {
+          label_len = **p;
+          (*p)++;
+          while (label_len != 0){
+            putchar(**p);
+            label_len--;
+            (*p)++;
+          }
+          putchar('.'); // точка в самом конце доменого имени это не баг, а абсолютный путь
+  }
+  (*p)++; // Пропускаю завершающий 0
+  if (compressed) {
+    *p = name_start + 2; // Пропускаю 1 байт compression label
+  } 
 }
 
 // argv - указатель на первый элемент массива указателей на строки - массив строк (аргументы командой строки - строки)
@@ -237,24 +268,17 @@ int main(int argc, char **argv) {
     uint16_t recv_nscount = ((uint16_t)recieve_buffer[8] << 8) | recieve_buffer[9]; 
     uint16_t recv_arcount = ((uint16_t)recieve_buffer[10] << 8) | recieve_buffer[11]; 
     printf("Количество resource records в секциях: QDCOUNT = %u, ANCOUNT = %u, NSCOUNT = %u, ARCOUNT = %u. \n", (unsigned int)recv_qdcount, (unsigned int)recv_ancount, (unsigned int)recv_nscount, (unsigned int)recv_arcount);
-    uint8_t label_len;
     if (recv_qdcount != 1) {
       printf("Ух-ты, количество записей QDCOUNT отличается от единицы! Сравните имена запросов с теми, что вводили вы:\n");;
       p = &recieve_buffer[12];
       for (int i = recv_qdcount; i != 0; i--) {
-        while (*p != 0) {
-          label_len = *p;
-          p++;
-          while (label_len != 0){
-            putchar(*p);
-            label_len--;
-            p++;
-          }
-          putchar('.');
-        }
-        p += 5; // Пропуск байта 0, которым заканчивается query name и полей query type и query class (по 2 байта каждое)
+        parse_name(recieve_buffer, &p); // recieve_buffer - адрес первого байта буфера, &p - адрес переменной-указателя
+        p += 4; // Пропуск полей query type и query class (по 2 байта каждое)
         printf("\n");  
       }   
+    }
+    for (int i = recv_ancount; i != 0; i--) {
+      
     }
     
 
