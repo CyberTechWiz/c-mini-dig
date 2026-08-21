@@ -9,9 +9,44 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// Структура DNS сообщения
+struct dns_message {
+    uint16_t id;
+
+    uint16_t flags;
+
+    uint16_t qdcount;
+    uint16_t ancount;
+    uint16_t nscount;
+    uint16_t arcount;
+
+    struct dns_question *questions;
+    struct dns_rr *answers;
+    struct dns_rr *authority;
+    struct dns_rr *additional;
+};
+
+// Структура записи из секции Question
+struct dns_question {
+    char *name;
+    uint16_t type;
+    uint16_t class;
+};
+
+// Структура RR из секций answers, authority и additional
+struct dns_rr {
+    char *name;
+    uint16_t type;
+    uint16_t class;
+    uint32_t ttl;
+    uint16_t rdlength;
+    uint8_t *rdata;
+};
+
+// Тип запроса 
 enum query_type {
-  A,
-  AAAA
+  DNS_A = 1,
+  DNS_AAAA = 28
 };
 
 // То, что ввел user
@@ -24,12 +59,12 @@ struct config {
 // Выводит mini guide на mini pig
 void print_guide(){
       printf("Запуск утилиты выглядит так:\n");
-      printf("mini-dig <server> <domain> <type>.\n");
+      printf("./mini-dig <server> <domain> <type>.\n");
       printf("<server> - IPv4 адрес DNS-сервера, которому будет отправлен запрос. Должен начинаться с символа '@'. Поставьте дифис чтобы был выбран dns-сервер системы.\n");
       printf("<domain> - domain, о котором нужно найти информацию. Поставьте дефис чтобы был выбран домен example.com\n");
       printf("<type> - тип запроса: А - запрос IPv4 адреса для domain или АААА - запрос IPv6 адреса для domain. Поставьте дефис чтобы был выбран A.\n");
       printf("Пример запуска:\n");
-      printf("mini-dig @1.1.1.1 example.com A\n");
+      printf("./mini-dig @8.8.8.8 google.com A\n");
       printf("(Программа может обработать compression label на весь domain name, Но в случае мешанины из data label и compression label будет выведен некорретный domain name).\n");
 }
 
@@ -88,7 +123,7 @@ void parse_name(uint8_t *buffer, uint8_t **p) {
 // argv - указатель на первый элемент массива указателей на строки - массив строк (аргументы командой строки - строки)
 int main(int argc, char **argv) {
     printf("\n");
-    
+
     struct config config;
 
     if (argc != 4){
@@ -128,14 +163,14 @@ int main(int argc, char **argv) {
     // Обрабатываю третий аргумент - type
     if (argv[3][0] == '-'){
       printf("Для отправки DNS-запроса выбран type A - запрос IPv4 адреса.\n");
-      config.type = A;
+      config.type = DNS_A;
     }
     else {
       if (strcmp(argv[3], "A") == 0){
-        config.type = A;
+        config.type = DNS_A;
       }
       else if (strcmp(argv[3], "AAAA") == 0){
-        config.type = AAAA;
+        config.type = DNS_AAAA;
       }
       else {
         printf("Error: Аргументы командной строки: тип запроса неверен.\n");
@@ -316,6 +351,7 @@ int main(int argc, char **argv) {
     printf("\nСекция Question: \n");
       for (int i = recv_qdcount; i != 0; i--) {
         parse_name(recieve_buffer, &recv_p); // recieve_buffer - адрес первого байта буфера, &recv_p - адрес переменной-указателя
+        // recv_p указывает на начало Query Type
         recv_p += 4; // Пропуск полей query type и query class (по 2 байта каждое)
         printf("\n");  
       }   
@@ -360,7 +396,7 @@ int main(int argc, char **argv) {
       switch (recv_rr_class)
       {
       case 1:
-        printf("A: RR class is Internet.\n");
+        printf("RR class is Internet.\n");
         break;
       default:
         printf("Класс RR нераспознан\n");
