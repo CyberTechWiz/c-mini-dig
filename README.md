@@ -46,94 +46,45 @@ Received buffer:
 000a: 00 00 06 67 6f 6f 67 6c 65 03
 0014: 63 6f 6d 00 00 01 00 01 c0 0c
 001e: 00 01 00 01 00 00 01 2c 00 04
-0028: 40 e9 a4 64 c0 0c 00 01 00 01
-0032: 00 00 01 2c 00 04 40 e9 a4 8b
+0028: 4a 7d cd 65 c0 0c 00 01 00 01
+0032: 00 00 01 2c 00 04 4a 7d cd 8b
 003c: c0 0c 00 01 00 01 00 00 01 2c
-0046: 00 04 40 e9 a4 8a c0 0c 00 01
-0050: 00 01 00 00 01 2c 00 04 40 e9
-005a: a4 65 c0 0c 00 01 00 01 00 00
-0064: 01 2c 00 04 40 e9 a4 66 c0 0c
+0046: 00 04 4a 7d cd 71 c0 0c 00 01
+0050: 00 01 00 00 01 2c 00 04 4a 7d
+005a: cd 66 c0 0c 00 01 00 01 00 00
+0064: 01 2c 00 04 4a 7d cd 8a c0 0c
 006e: 00 01 00 01 00 00 01 2c 00 04
-0078: 40 e9 a4 71
+0078: 4a 7d cd 64
+
+Transaction ID = 0x1234
+
+Flags = 0x8180:
+QR = 1
+AA = 0
+TC = 0
+RD = 1
+RA = 1
+Z  = 0
+AD = 0
+CD = 0
 
 Количество resource records в секциях: QDCOUNT = 0x0001, ANCOUNT = 0x0006, NSCOUNT = 0x0000, ARCOUNT = 0x0000.
 
 
 Секция Question:
-google.com.
-
+Name                           Type   Class
+google.com                     A      1
 
 Секция Answer:
-google.com.
-A: RR type is address record for IPv4. RDLENGHT должен быть равен 4 байтам
-RR class is Internet.
-Запись будет храниться TTL = 300 секунд.
-Поле данных занимает RDLENGTH = 4 байт.
-Получен IPv4-адрес: 64.233.164.100
+Name                           Type   Class  TTL        RDLENGTH   RDATA
+google.com                     A      1      300        4          74.125.205.101
+google.com                     A      1      300        4          74.125.205.139
+google.com                     A      1      300        4          74.125.205.113
+google.com                     A      1      300        4          74.125.205.102
+google.com                     A      1      300        4          74.125.205.138
+google.com                     A      1      300        4          74.125.205.100
 
-google.com.
-A: RR type is address record for IPv4. RDLENGHT должен быть равен 4 байтам
-RR class is Internet.
-Запись будет храниться TTL = 300 секунд.
-Поле данных занимает RDLENGTH = 4 байт.
-Получен IPv4-адрес: 64.233.164.139
+Записей в секции Authority нет
 
-google.com.
-A: RR type is address record for IPv4. RDLENGHT должен быть равен 4 байтам
-RR class is Internet.
-Запись будет храниться TTL = 300 секунд.
-Поле данных занимает RDLENGTH = 4 байт.
-Получен IPv4-адрес: 64.233.164.138
-
-google.com.
-A: RR type is address record for IPv4. RDLENGHT должен быть равен 4 байтам
-RR class is Internet.
-Запись будет храниться TTL = 300 секунд.
-Поле данных занимает RDLENGTH = 4 байт.
-Получен IPv4-адрес: 64.233.164.101
-
-google.com.
-A: RR type is address record for IPv4. RDLENGHT должен быть равен 4 байтам
-RR class is Internet.
-Запись будет храниться TTL = 300 секунд.
-Поле данных занимает RDLENGTH = 4 байт.
-Получен IPv4-адрес: 64.233.164.102
-
-google.com.
-A: RR type is address record for IPv4. RDLENGHT должен быть равен 4 байтам
-RR class is Internet.
-Запись будет храниться TTL = 300 секунд.
-Поле данных занимает RDLENGTH = 4 байт.
-Получен IPv4-адрес: 64.233.164.113
-
-
-
-Записей в секции Authority нет.
-
-
-Записей в секции Additional Information нет.
-
-
-
-Дамп для отладки:
-
-Generated send buffer:
-0000: 12 34 01 00 00 01 00 00 00 00
-000a: 00 00 06 67 6f 6f 67 6c 65 03
-0014: 63 6f 6d 00 00 01 00 01
-
-Received buffer:
-0000: 12 34 81 80 00 01 00 06 00 00
-000a: 00 00 06 67 6f 6f 67 6c 65 03
-0014: 63 6f 6d 00 00 01 00 01 c0 0c
-001e: 00 01 00 01 00 00 01 2c 00 04
-0028: 40 e9 a4 64 c0 0c 00 01 00 01
-0032: 00 00 01 2c 00 04 40 e9 a4 8b
-003c: c0 0c 00 01 00 01 00 00 01 2c
-0046: 00 04 40 e9 a4 8a c0 0c 00 01
-0050: 00 01 00 00 01 2c 00 04 40 e9
-005a: a4 65 c0 0c 00 01 00 01 00 00
-0064: 01 2c 00 04 40 e9 a4 66 c0 0c
-006e: 00 01 00 01 00 00 01 2c 00 04
-0078: 40 e9 a4 71
+Записей в секции Additional Information нет
 ```

@@ -1,9 +1,6 @@
 // gcc mini-dig.c -o mini-dig
-// ! Сейчас происходит изменение программы из мешанины в структурированный вид
 // TODO: Добавить поддержку IPv6
 // TODO: Добавить новые типы запросов (в первую очередь NS)
-// TODO: Добавить анализ флагов DNS заголовка
-// TODO: Добавить анализ класса и типа в секции Query
 // TODO: Добавить получение адреса локального резолвера системы
 // TODO: Добавить рандомную генерацию Transaction ID
 #include <stdio.h>
@@ -59,6 +56,20 @@ enum query_type
     DNS_AAAA = 28
 };
 
+// Функция возвращает строку в зависимости от типа
+const char *query_type_to_str(uint8_t type)
+{
+    switch (type)
+    {
+    case DNS_A:
+        return "A";
+    case DNS_AAAA:
+        return "AAAA";
+    default:
+        return "UNKNOWN";
+    }
+}
+
 // То, что ввел user
 struct config
 {
@@ -94,6 +105,45 @@ void write_u32(uint8_t *p, uint32_t value)
     p[1] = (value >> 16) & 0xFF;
     p[2] = (value >> 8) & 0xFF;
     p[3] = value & 0xFF;
+}
+
+void free_dns_message(struct dns_message *message)
+{
+    if (message->questions != NULL)
+    {
+        for (size_t i = 0; i < message->qdcount; i++)
+        {
+            free(message->questions[i].name);
+        }
+        free(message->questions);
+    }
+    if (message->answers != NULL)
+    {
+        for (size_t i = 0; i < message->ancount; i++)
+        {
+            free(message->answers[i].name);
+            free(message->answers[i].rdata);
+        }
+        free(message->answers);
+    }
+    if (message->authority != NULL)
+    {
+        for (size_t i = 0; i < message->nscount; i++)
+        {
+            free(message->authority[i].name);
+            free(message->authority[i].rdata);
+        }
+        free(message->authority);
+    }
+    if (message->additional != NULL)
+    {
+        for (size_t i = 0; i < message->arcount; i++)
+        {
+            free(message->additional[i].name);
+            free(message->additional[i].rdata);
+        }
+        free(message->additional);
+    }
 }
 
 // Принимает указатель на указатель, чтобы иметь возможность изменять сам указатель
@@ -205,7 +255,7 @@ char *read_domain_name(uint8_t **p, const uint8_t *buffer, size_t buffer_size)
     char *name = malloc(256);
     if (name == NULL)
     {
-        printf("Error: Ошибка выделения памяти для чтения domain name (255 bytes), malloc()");
+        printf("Error: Ошибка выделения памяти для чтения domain name (255 bytes), malloc()\n");
         return NULL;
     }
 
@@ -223,7 +273,7 @@ char *read_domain_name(uint8_t **p, const uint8_t *buffer, size_t buffer_size)
         if (current_p < buffer || current_p >= buffer + buffer_size)
         {
             free(name);
-            printf("Error: Указатель вышел за пределы буфера полученного DNS-ответа, read_domain_name()");
+            printf("Error: Указатель вышел за пределы буфера полученного DNS-ответа, read_domain_name()\n");
             return NULL;
         }
 
@@ -247,7 +297,7 @@ char *read_domain_name(uint8_t **p, const uint8_t *buffer, size_t buffer_size)
             if (current_p + 1 >= buffer + buffer_size)
             {
                 free(name);
-                printf("Error: Указатель вышел за пределы буфера полученного DNS-ответа, read_domain_name()");
+                printf("Error: Указатель вышел за пределы буфера полученного DNS-ответа, read_domain_name()\n");
                 return NULL;
             }
             // (current_p[0] & 0b00111111) - стираю служебные биты в первом байте, чтобы осталась только часть, отвечающая за смещение
@@ -258,7 +308,7 @@ char *read_domain_name(uint8_t **p, const uint8_t *buffer, size_t buffer_size)
             if (offset >= buffer_size)
             {
                 free(name);
-                printf("Error: Compression label идёт за пределы буфера полученного DNS-ответа, read_domain_name()");
+                printf("Error: Compression label идёт за пределы буфера полученного DNS-ответа, read_domain_name()\n");
                 return NULL;
             }
             // Если это не вложенная ссылка, то выставляю флаг перехода по ссылке
@@ -276,7 +326,7 @@ char *read_domain_name(uint8_t **p, const uint8_t *buffer, size_t buffer_size)
         if ((first & 0b11000000) != 0)
         {
             free(name);
-            printf("Error: Некорректный первый байт domain name, read_domain_name()");
+            printf("Error: Некорректный первый байт domain name, read_domain_name()\n");
             return NULL;
         }
 
@@ -285,7 +335,7 @@ char *read_domain_name(uint8_t **p, const uint8_t *buffer, size_t buffer_size)
         if (label_len > 63)
         {
             free(name);
-            printf("Error: Each label can be up to 63 characters long, read_domain_name()");
+            printf("Error: Each label can be up to 63 characters long, read_domain_name()\n");
             return NULL;
         }
 
@@ -298,7 +348,7 @@ char *read_domain_name(uint8_t **p, const uint8_t *buffer, size_t buffer_size)
         // Проверяю, что размер результирующей строки не выходит за пределы
         if (name_len + label_len >= 256)
         {
-            printf("Error: Entire fully qualified domain name is limited to at most 255 characters, read_domain_name()");
+            printf("Error: Entire fully qualified domain name is limited to at most 255 characters, read_domain_name()\n");
             free(name);
             return NULL;
         }
@@ -313,9 +363,50 @@ char *read_domain_name(uint8_t **p, const uint8_t *buffer, size_t buffer_size)
     return name;
 }
 
+//TODO: Сделать проверку на выходы за границы буфера
+bool read_rr(struct dns_rr *rr, uint8_t **p, const uint8_t *buffer, size_t buffer_size)
+{
+    rr->name = read_domain_name(p, buffer, buffer_size);
+    if (rr->name == NULL)
+    {
+        return false;
+    }
+    rr->type = read_u16(*p);
+    *p += 2;
+    rr->class = read_u16(*p);
+    *p += 2;
+    rr->ttl = read_u32(*p);
+    *p += 4;
+    rr->rdlength = read_u16(*p);
+    *p += 2;
+
+    if (rr->rdlength > 0)
+    {
+        rr->rdata = malloc(rr->rdlength);
+        if (rr->rdata == NULL)
+        {
+            printf("Error: Ошибка выделения памяти под RDATA для чтения RR, malloc().\n");
+            return false;
+        }
+        memcpy(rr->rdata, *p, rr->rdlength);
+        *p += rr->rdlength;
+    }
+    else
+    {
+        rr->rdata = NULL;
+    }
+    return true;
+}
+
+//TODO: Сделать проверку на выход за границы буфера
 // Читает из буфера полученное dns-сообщение и записывает в структуру recv_message. В случае успеха возвращает 1
 bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffer_size)
 {
+    if (buffer_size < 12)
+    {
+        printf("DNS Header меньше 12 байт.\n");
+        return false;
+    }
     uint8_t *p = buffer; // любимый указатель для перемещения по буферу
     // Сейчас р указывает на начало DNS-заголовка
     message->id = read_u16(p);
@@ -339,67 +430,177 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
     // Выделяю память под структуры (questions - указатель на первый элемент массива структур)
     if (message->qdcount > 0)
     {
-        message->questions = malloc(message->qdcount * sizeof(struct dns_question));
+        message->questions = calloc(message->qdcount, sizeof(struct dns_question));
+
         if (message->questions == NULL)
         {
-            printf("Error: Ошибка выделения памяти под Question Section в DNS-ответе, malloc(). Количество записей в секции: QDCOUNT = %u", message->qdcount);
-            return 0;
+            printf("Error: Ошибка выделения памяти под Question Section в DNS-ответе, malloc(). Количество записей в секции: QDCOUNT = %u \n", message->qdcount);
+            free_dns_message(message);
+            return false;
         }
     }
     if (message->ancount > 0)
     {
-        message->answers = malloc(message->ancount * sizeof(struct dns_rr));
+        message->answers = calloc(message->ancount, sizeof(struct dns_rr));
         if (message->answers == NULL)
         {
-            printf("Error: Ошибка выделения памяти под Answer Section a в DNS-ответе, malloc(). Количество записей в секции: ANCOUNT = %u", message->ancount);
-            return 0;
+            printf("Error: Ошибка выделения памяти под Answer Section в DNS-ответе, malloc(). Количество записей в секции: ANCOUNT = %u \n", message->ancount);
+            free_dns_message(message);
+            return false;
         }
     }
     if (message->nscount > 0)
     {
-        message->authority = malloc(message->nscount * sizeof(struct dns_rr));
+        message->authority = calloc(message->nscount, sizeof(struct dns_rr));
         if (message->authority == NULL)
         {
-            printf("Error: Ошибка выделения памяти под Authority Section a в DNS-ответе, malloc(). Количество записей в секции: NSCOUNT = %u", message->nscount);
-            return 0;
+            printf("Error: Ошибка выделения памяти под Authority Section в DNS-ответе, malloc(). Количество записей в секции: NSCOUNT = %u \n", message->nscount);
+            free_dns_message(message);
+            return false;
         }
     }
     if (message->arcount > 0)
     {
-        message->additional = malloc(message->arcount * sizeof(struct dns_rr));
+        message->additional = calloc(message->arcount, sizeof(struct dns_rr));
         if (message->additional == NULL)
         {
-            printf("Error: Ошибка выделения памяти под Additional Information Section a в DNS-ответе, malloc(). Количество записей в секции: ARCOUNT = %u", message->arcount);
-            return 0;
+            printf("Error: Ошибка выделения памяти под Additional Information Section в DNS-ответе, malloc(). Количество записей в секции: ARCOUNT = %u \n", message->arcount);
+            free_dns_message(message);
+            return false;
         }
     }
 
     // Сейчас р указывает на начало первой секции (если они есть)
-    for (int i = message->qdcount; i != 0; i--)
+    for (uint16_t i = 0; i < message->qdcount; i++)
     {
         message->questions[i].name = read_domain_name(&p, buffer, buffer_size);
         if (message->questions[i].name == NULL)
         {
+            free_dns_message(message);
             return false;
         }
         message->questions[i].type = read_u16(p);
-        p+=2;
+        p += 2;
         message->questions[i].class = read_u16(p);
-        p+=2;
+        p += 2;
     }
-    for (int i = message->ancount; i != 0; i--)
+    for (uint16_t i = 0; i < message->ancount; i++)
     {
-        message->answers[i].name = read_domain_name(&p, buffer, buffer_size);
-        if (message->answers[i].name == NULL)
+        if (!read_rr(&message->answers[i], &p, buffer, buffer_size))
         {
+            free_dns_message(message);
             return false;
         }
-        message->answers[i].type = read_u16(p);
-        p+=2;
-        message->answers[i].class = read_u16(p);
-        p+=2;
-        message->answers[i].ttl = read_u32(p);
-        p+=4;
+    }
+    for (uint16_t i = 0; i < message->nscount; i++)
+    {
+        if (!read_rr(&message->authority[i], &p, buffer, buffer_size))
+        {
+            free_dns_message(message);
+            return false;
+        }
+    }
+    for (uint16_t i = 0; i < message->arcount; i++)
+    {
+        if (!read_rr(&message->additional[i], &p, buffer, buffer_size))
+        {
+            free_dns_message(message);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool output_rr(const struct dns_rr *rr)
+{
+    char ip_addr[INET6_ADDRSTRLEN];
+    int family;
+    switch (rr->type)
+    {
+    case DNS_A:
+        if (rr->rdlength != 4)
+        {
+            printf("Warning: Значение rdlength не соответсвует ожидаемому значению для типа записи А!\n");
+        }
+        family = AF_INET;
+        break;
+    case DNS_AAAA:
+        if (rr->rdlength != 16)
+        {
+            printf("Warning: Значение rdlength не соответсвует ожидаемому значению для типа записи АAAA!\n");
+        }
+        family = AF_INET6;
+        break;
+    default:
+        printf("%-30s %-6s %-6u %-10u %-10u\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength);
+    }
+    if (inet_ntop(family, rr->rdata, ip_addr, sizeof(ip_addr)) == NULL)
+    {
+        printf("Ошибка перевода IP-адреса из сетевого в текстовый формат, inet_ntop().\n");
+        printf("%-30s %-6s %-6u %-10u %-10u\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength);
+    }
+    else
+    {
+        printf("%-30s %-6s %-6u %-10u %-10u %-39s\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength, ip_addr);
+    }
+}
+
+void output_dns_message(struct dns_message *message)
+{
+    printf("Transaction ID = 0x%04x \n", (unsigned int)message->id);
+    printf("\nFlags = 0x%04x: \nQR = %u \nAA = %u \nTC = %u \nRD = %u \nRA = %u \nZ  = %u \nAD = %u \nCD = %u \n", (unsigned int)message->flags, (unsigned int)(message->flags >> 15) & 1, (unsigned int)(message->flags >> 10) & 1, (unsigned int)(message->flags >> 9) & 1, (unsigned int)(message->flags >> 8) & 1, (unsigned int)(message->flags >> 7) & 1, (unsigned int)(message->flags >> 6) & 1, (unsigned int)(message->flags >> 5) & 1, (unsigned int)(message->flags >> 4) & 1);
+    printf("\nКоличество resource records в секциях: QDCOUNT = 0x%04x, ANCOUNT = 0x%04x, NSCOUNT = 0x%04x, ARCOUNT = 0x%04x. \n\n", (unsigned int)message->qdcount, (unsigned int)message->ancount, (unsigned int)message->nscount, (unsigned int)message->arcount);
+    if (message->qdcount > 0)
+    {
+        printf("\nСекция Question: \n");
+        printf("%-30s %-6s %-6s\n", "Name", "Type", "Class");
+        for (uint16_t i = 0; i < message->qdcount; i++)
+        {
+            printf("%-30s %-6s %-6u\n", message->questions[i].name, query_type_to_str(message->questions[i].type), message->questions[i].class);
+        }
+    }
+    else
+    {
+        printf("Записей в секции Question нет\n");
+    }
+    if (message->ancount > 0)
+    {
+        printf("\nСекция Answer: \n");
+        printf("%-30s %-6s %-6s %-10s %-10s %-39s\n", "Name", "Type", "Class", "TTL", "RDLENGTH", "RDATA");
+        for (uint16_t i = 0; i < message->ancount; i++)
+        {
+            output_rr(&message->answers[i]);
+        }
+    }
+    else
+    {
+        printf("\nЗаписей в секции Answer нет\n");
+    }
+    if (message->nscount > 0)
+    {
+        printf("\nСекция Authority: \n");
+        printf("%-30s %-6s %-6s %-10s %-10s %-39s\n", "Name", "Type", "Class", "TTL", "RDLENGTH", "RDATA");
+        for (uint16_t i = 0; i < message->nscount; i++)
+        {
+            output_rr(&message->authority[i]);
+        }
+    }
+    else
+    {
+        printf("\nЗаписей в секции Authority нет\n");
+    }
+    if (message->arcount > 0)
+    {
+        printf("\nСекция Additional Information: \n");
+        printf("%-30s %-6s %-6s %-10s %-10s %-39s\n", "Name", "Type", "Class", "TTL", "RDLENGTH", "RDATA");
+        for (uint16_t i = 0; i < message->arcount; i++)
+        {
+            output_rr(&message->additional[i]);
+        }
+    }
+    else
+    {
+        printf("\nЗаписей в секции Additional Information нет\n");
     }
 }
 
@@ -632,7 +833,7 @@ int main(int argc, char **argv)
     struct dns_message recv_message;
 
     // Вызываю функцию для чтения dns-сообщения
-    if (read_dns_message(&recv_message, recieve_buffer, sizeof(recieve_buffer)) == 0)
+    if (read_dns_message(&recv_message, recieve_buffer, result_of_call_bytes_ssize_t) == 0)
     {
         return EXIT_FAILURE;
     }
@@ -643,136 +844,8 @@ int main(int argc, char **argv)
         printf("Полученный DNS-ответ содержит ID-транзакции отличный от отправленного DNS-запроса: ID = %u (был отправлен ID = %u)!\n", (unsigned int)recv_message.id, (unsigned int)send_message.id);
     }
 
-    // TODO: Чтение сообщения: выделить в отдельную функцию
-    // TODO: Разбор флагов сделать сложнее, он будет реализован позже
-    printf("Количество resource records в секциях: QDCOUNT = 0x%04x, ANCOUNT = 0x%04x, NSCOUNT = 0x%04x, ARCOUNT = 0x%04x. \n\n", (unsigned int)recv_message.qdcount, (unsigned int)recv_message.ancount, (unsigned int)recv_message.nscount, (unsigned int)recv_message.arcount);
-    uint8_t *recv_p = &recieve_buffer[12]; // recv_p указывает на начало первой секции
-    // TODO: Вывод полученной структуры выделить в отдельную функцию
-    printf("\nСекция Question: \n");
-    for (int i = recv_qdcount; i != 0; i--)
-    {
-        parse_name(recieve_buffer, &recv_p); // recieve_buffer - адрес первого байта буфера, &recv_p - адрес переменной-указателя
-        // recv_p указывает на начало Query Type
-        recv_p += 4; // Пропуск полей query type и query class (по 2 байта каждое)
-        printf("\n");
-    }
-
-    // recv_p указывает на начало секции answer
-    uint16_t recv_rr_type;  // Хранит тип rr полученного dns-сообщения
-    uint16_t recv_rr_class; // Хранит класс
-    uint32_t recv_rr_ttl;
-    uint16_t recv_rr_rdlength;
-    uint16_t presumed_recv_rr_rdlength = 0;
-    char data[INET6_ADDRSTRLEN];
-    if (recv_ancount < 1)
-    {
-        printf("Записей в секции Answer нет :(\n");
-    }
-    else
-    {
-        printf("\n\nСекция Answer: \n");
-        for (int i = recv_ancount; i != 0; i--)
-        {
-            // Снова читаю и вывожу доменные имена
-            parse_name(recieve_buffer, &recv_p);
-            // recv_p указывает на начало поля Type
-            recv_rr_type = ((uint16_t)(recv_p[0]) << 8) | recv_p[1];
-            switch (recv_rr_type)
-            {
-            case 1:
-                // В поле RDLENGTH будет значение 4
-                printf("\nA: RR type is address record for IPv4. RDLENGHT должен быть равен 4 байтам\n");
-                presumed_recv_rr_rdlength = 4;
-                break;
-            case 28:
-                // В поле RDLENGTH будет значение 16
-                printf("\nAAAA: RR type is address record for IPv6. RDLENGHT должен быть равен 16 байтам\n");
-                presumed_recv_rr_rdlength = 16;
-                break;
-            default:
-                printf("\nТип RR нераспознан\n");
-                presumed_recv_rr_rdlength = 0;
-                break;
-            }
-            recv_p += 2; // Смещаю указатель на 2 questionsбайта, так как поле Type пройдено
-            // recv_p указывает на начало поля Class
-            recv_rr_class = ((uint16_t)(recv_p[0]) << 8) | recv_p[1];
-            switch (recv_rr_class)
-            {
-            case 1:
-                printf("RR class is Internet.\n");
-                break;
-            default:
-                printf("Класс RR нераспознан\n");
-                break;
-            }
-            recv_p += 2;
-            // recv_p указывает на начало поля TTL
-            // Поле TTL будет потолще, поэтому в uint16_t не влезет
-            recv_rr_ttl = ((uint32_t)(recv_p[0]) << 24) | ((uint32_t)(recv_p[1]) << 16) | ((uint32_t)(recv_p[2]) << 8) | recv_p[3];
-            printf("Запись будет храниться TTL = %u секунд.\n", (unsigned int)recv_rr_ttl);
-            recv_p += 4;
-            // recv_p указывает на начало поля RDLENGTH
-            recv_rr_rdlength = ((uint16_t)(recv_p[0]) << 8) | recv_p[1];
-            printf("Поле данных занимает RDLENGTH = %u байт.\n", (unsigned int)recv_rr_rdlength);
-            if (presumed_recv_rr_rdlength != 0 && presumed_recv_rr_rdlength != recv_rr_rdlength)
-            {
-                printf("Поле данных занимает не столько байтов, сколько предполагалось на основе типа RR.\n");
-            }
-            recv_p += 2;
-            // recv_p указывает на начало поля RDATA
-            switch (recv_rr_type)
-            {
-            case 1:
-                if (inet_ntop(AF_INET, recv_p, data, sizeof(data)) == NULL)
-                {
-                    printf("Ошибка перевода IPv4 адреса из сетевого в текстовый формат, inet_ntop().\n");
-                }
-                else
-                {
-                    printf("Получен IPv4-адрес: %s\n", data);
-                }
-                break;
-            case 28:
-                if (inet_ntop(AF_INET6, recv_p, data, sizeof(data)) == NULL)
-                {
-                    printf("Ошибка перевода IPv6 адреса из сетевого в текстовый формат, inet_ntop().\n");
-                }
-                else
-                {
-                    printf("Получен IPv6-адрес: %s\n", data);
-                }
-                break;
-            default:
-                printf("\nДанные записи не будут выведены, так как тип RR нераспознан\n");
-                printf("\n\nШутка. Вот сие нечто:\n");
-                for (uint16_t i = 0; i < recv_rr_rdlength; i++)
-                {
-                    printf("%02x ", recv_p[i]);
-                }
-                printf("\n");
-                break;
-            }
-            printf("\n");
-            recv_p += recv_rr_rdlength;
-        }
-    }
-    if (recv_nscount < 1)
-    {
-        printf("\n\nЗаписей в секции Authority нет.\n");
-    }
-    if (recv_arcount < 1)
-    {
-        printf("\n\nЗаписей в секции Additional Information нет.\n");
-    }
-
-    printf("\n\n\nДамп для отладки:\n");
-    printf("\n");
-    printf("Generated send buffer: \n");
-    hex_dump(send_buffer, send_message_len);
-    printf("\n");
-    printf("Received buffer: \n");
-    hex_dump(recieve_buffer, result_of_call_bytes_ssize_t);
-
-    return 0;
+    // Вывожу результат работы программы - полученный DNS-ответ
+    output_dns_message(&recv_message);
+    free_dns_message(&recv_message);
+    return EXIT_SUCCESS;
 }
