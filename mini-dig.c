@@ -435,7 +435,6 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
         if (message->questions == NULL)
         {
             printf("Error: Ошибка выделения памяти под Question Section в DNS-ответе, malloc(). Количество записей в секции: QDCOUNT = %u \n", message->qdcount);
-            free_dns_message(message);
             return false;
         }
     }
@@ -445,7 +444,6 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
         if (message->answers == NULL)
         {
             printf("Error: Ошибка выделения памяти под Answer Section в DNS-ответе, malloc(). Количество записей в секции: ANCOUNT = %u \n", message->ancount);
-            free_dns_message(message);
             return false;
         }
     }
@@ -455,7 +453,6 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
         if (message->authority == NULL)
         {
             printf("Error: Ошибка выделения памяти под Authority Section в DNS-ответе, malloc(). Количество записей в секции: NSCOUNT = %u \n", message->nscount);
-            free_dns_message(message);
             return false;
         }
     }
@@ -465,7 +462,6 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
         if (message->additional == NULL)
         {
             printf("Error: Ошибка выделения памяти под Additional Information Section в DNS-ответе, malloc(). Количество записей в секции: ARCOUNT = %u \n", message->arcount);
-            free_dns_message(message);
             return false;
         }
     }
@@ -476,7 +472,6 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
         message->questions[i].name = read_domain_name(&p, buffer, buffer_size);
         if (message->questions[i].name == NULL)
         {
-            free_dns_message(message);
             return false;
         }
         message->questions[i].type = read_u16(p);
@@ -488,7 +483,6 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
     {
         if (!read_rr(&message->answers[i], &p, buffer, buffer_size))
         {
-            free_dns_message(message);
             return false;
         }
     }
@@ -496,7 +490,6 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
     {
         if (!read_rr(&message->authority[i], &p, buffer, buffer_size))
         {
-            free_dns_message(message);
             return false;
         }
     }
@@ -504,7 +497,6 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
     {
         if (!read_rr(&message->additional[i], &p, buffer, buffer_size))
         {
-            free_dns_message(message);
             return false;
         }
     }
@@ -833,8 +825,9 @@ int main(int argc, char **argv)
     struct dns_message recv_message;
 
     // Вызываю функцию для чтения dns-сообщения
-    if (read_dns_message(&recv_message, recieve_buffer, result_of_call_bytes_ssize_t) == 0)
+    if (!read_dns_message(&recv_message, recieve_buffer, result_of_call_bytes_ssize_t))
     {
+        free_dns_message(&recv_message);
         return EXIT_FAILURE;
     }
 
@@ -846,6 +839,7 @@ int main(int argc, char **argv)
 
     // Вывожу результат работы программы - полученный DNS-ответ
     output_dns_message(&recv_message);
+    
     free_dns_message(&recv_message);
     return EXIT_SUCCESS;
 }
