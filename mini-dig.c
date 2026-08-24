@@ -56,6 +56,20 @@ enum query_type
     DNS_AAAA = 28
 };
 
+// RCODE Type
+const char *rcode_type[] = {
+    "No error.",
+    "Format error; query cannot be interpreted.",
+    "Server failure; error in processing at server.",
+    "Nonexistent domain; unknown domain referenced",
+    "Not implemented; request not supported in server",
+    "Refused; server unwilling to provide answer",
+    "Name exists but should not (used with updates)",
+    "RRSet exists but should not (used with updates)",
+    "RRSet does not exist but should (used with updates)",
+    "Server not authorized for zone (used with updates)",
+    "Name not contained in zone (used with updates)"};
+
 // Функция возвращает строку в зависимости от типа
 const char *query_type_to_str(uint8_t type)
 {
@@ -363,7 +377,7 @@ char *read_domain_name(uint8_t **p, const uint8_t *buffer, size_t buffer_size)
     return name;
 }
 
-//TODO: Сделать проверку на выходы за границы буфера
+// TODO: Сделать проверку на выходы за границы буфера
 bool read_rr(struct dns_rr *rr, uint8_t **p, const uint8_t *buffer, size_t buffer_size)
 {
     rr->name = read_domain_name(p, buffer, buffer_size);
@@ -398,8 +412,8 @@ bool read_rr(struct dns_rr *rr, uint8_t **p, const uint8_t *buffer, size_t buffe
     return true;
 }
 
-//TODO: Сделать проверку на выход за границы буфера
-// Читает из буфера полученное dns-сообщение и записывает в структуру recv_message. В случае успеха возвращает 1
+// TODO: Сделать проверку на выход за границы буфера
+//  Читает из буфера полученное dns-сообщение и записывает в структуру recv_message. В случае успеха возвращает 1
 bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffer_size)
 {
     if (buffer_size < 12)
@@ -540,7 +554,17 @@ bool output_rr(const struct dns_rr *rr)
 void output_dns_message(struct dns_message *message)
 {
     printf("Transaction ID = 0x%04x \n", (unsigned int)message->id);
-    printf("\nFlags = 0x%04x: \nQR = %u \nAA = %u \nTC = %u \nRD = %u \nRA = %u \nZ  = %u \nAD = %u \nCD = %u \n", (unsigned int)message->flags, (unsigned int)(message->flags >> 15) & 1, (unsigned int)(message->flags >> 10) & 1, (unsigned int)(message->flags >> 9) & 1, (unsigned int)(message->flags >> 8) & 1, (unsigned int)(message->flags >> 7) & 1, (unsigned int)(message->flags >> 6) & 1, (unsigned int)(message->flags >> 5) & 1, (unsigned int)(message->flags >> 4) & 1);
+    printf("\nFlags = 0x%04x: \nQR = %u \nOpCode =  %u%u%u%u \nAA = %u \nTC = %u \nRD = %u \nRA = %u \nZ  = %u \nAD = %u \nCD = %u \nRCODE =   %u%u%u%u\n", (unsigned int)message->flags, (unsigned int)(message->flags >> 15) & 1, (unsigned int)(message->flags >> 14) & 1, (unsigned int)(message->flags >> 13) & 1, (unsigned int)(message->flags >> 12) & 1, (unsigned int)(message->flags >> 11) & 1, (unsigned int)(message->flags >> 10) & 1, (unsigned int)(message->flags >> 9) & 1, (unsigned int)(message->flags >> 8) & 1, (unsigned int)(message->flags >> 7) & 1, (unsigned int)(message->flags >> 6) & 1, (unsigned int)(message->flags >> 5) & 1, (unsigned int)(message->flags >> 4) & 1, (unsigned int)(message->flags >> 3) & 1, (unsigned int)(message->flags >> 2) & 1, (unsigned int)(message->flags >> 1) & 1, (unsigned int)(message->flags) & 1);
+    // Вывожу значение поля RCODE
+    uint8_t rcode_id = (message->flags) & 0b00001111;
+    if (rcode_type[rcode_id] != NULL)
+    {
+        printf("RCODE = %d: %s\n", rcode_id, rcode_type[rcode_id]);
+    }
+    else
+    {
+        printf("Unknown RCODE %d\n", rcode_id);
+    }
     printf("\nКоличество resource records в секциях: QDCOUNT = 0x%04x, ANCOUNT = 0x%04x, NSCOUNT = 0x%04x, ARCOUNT = 0x%04x. \n\n", (unsigned int)message->qdcount, (unsigned int)message->ancount, (unsigned int)message->nscount, (unsigned int)message->arcount);
     if (message->qdcount > 0)
     {
@@ -839,7 +863,7 @@ int main(int argc, char **argv)
 
     // Вывожу результат работы программы - полученный DNS-ответ
     output_dns_message(&recv_message);
-    
+
     free_dns_message(&recv_message);
     return EXIT_SUCCESS;
 }
