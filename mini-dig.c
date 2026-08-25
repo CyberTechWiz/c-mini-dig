@@ -61,14 +61,14 @@ const char *rcode_type[] = {
     "No error.",
     "Format error; query cannot be interpreted.",
     "Server failure; error in processing at server.",
-    "Nonexistent domain; unknown domain referenced",
-    "Not implemented; request not supported in server",
-    "Refused; server unwilling to provide answer",
-    "Name exists but should not (used with updates)",
-    "RRSet exists but should not (used with updates)",
-    "RRSet does not exist but should (used with updates)",
-    "Server not authorized for zone (used with updates)",
-    "Name not contained in zone (used with updates)"};
+    "Nonexistent domain; unknown domain referenced.",
+    "Not implemented; request not supported in server.",
+    "Refused; server unwilling to provide answer.",
+    "Name exists but should not (used with updates).",
+    "RRSet exists but should not (used with updates).",
+    "RRSet does not exist but should (used with updates).",
+    "Server not authorized for zone (used with updates).",
+    "Name not contained in zone (used with updates)."};
 
 // Функция возвращает строку в зависимости от типа
 const char *query_type_to_str(uint8_t type)
@@ -121,6 +121,12 @@ void write_u32(uint8_t *p, uint32_t value)
     p[3] = value & 0xFF;
 }
 
+// Для проверки выхода за границы буфера
+bool buffer_boundaries(const uint8_t *p, const uint8_t *buffer, size_t buffer_size, size_t required_byte_count)
+{
+    return (((size_t)(p - buffer) + required_byte_count) <= buffer_size);
+}
+
 void free_dns_message(struct dns_message *message)
 {
     if (message->questions != NULL)
@@ -168,6 +174,7 @@ bool write_domain_name(uint8_t **p, const char *name)
     // label перемещается по целому имени
     const char *pos = name;
     const char *label = name;
+    size_t max_full_name_len = 0; // Хранит длину целого доменного имени
     while (*pos != '\0')
     {
         if (*pos != '.')
@@ -182,7 +189,12 @@ bool write_domain_name(uint8_t **p, const char *name)
             printf("Error: Длина каждого лейбла в domain name не должна превышать 63 символа\n");
             return false;
         }
-
+        max_full_name_len = max_full_name_len + (pos - label) + 1;
+        if (max_full_name_len > 255)
+        {
+            printf("Error: Длина domain name не должна превышать 255 байт.\n");
+            return false;
+        }
         **p = (uint8_t)(pos - label);
         (*p)++;
         while (pos != label)
@@ -204,6 +216,7 @@ bool write_domain_name(uint8_t **p, const char *name)
         return false;
     }
 
+    max_full_name_len = max_full_name_len + (pos - label) + 1;
     **p = (uint8_t)(pos - label);
     (*p)++;
     while (pos != label)
@@ -216,13 +229,20 @@ bool write_domain_name(uint8_t **p, const char *name)
     // В конец domain name прилепить 0
     **p = 0;
     (*p)++;
+
+    if (max_full_name_len + 1 > 255)
+    {
+        printf("Error: Длина domain name не должна превышать 255 байт.\n");
+        return false;
+    }
+
     // Теперь p указывает на начало следующего поля
     return true;
 }
 
-// TODO: Добавить проверку на выход за пределы буфера. Пока что buffer_size не используется
+// В ближайшее время функция будет заполнять всего одну запись в секции question, так что переполнения буфера для домена длиной не более 255 не может произойти
 // Заполняет буфер отправляемого сообщения по содержимому структуры dns-сообщения. Возвращает размер заполненного буфера (DNS-сообщения)
-size_t build_dns_message(const struct dns_message *message, uint8_t *send_buffer, size_t buffer_size)
+size_t build_dns_message(const struct dns_message *message, uint8_t *send_buffer)
 {
     uint8_t *p = send_buffer; // текущая позиция
     // Сейчас p указывает на первый байт буфера для dns сообщения (send_buffer[0])
@@ -377,12 +397,16 @@ char *read_domain_name(uint8_t **p, const uint8_t *buffer, size_t buffer_size)
     return name;
 }
 
-// TODO: Сделать проверку на выходы за границы буфера
 bool read_rr(struct dns_rr *rr, uint8_t **p, const uint8_t *buffer, size_t buffer_size)
 {
     rr->name = read_domain_name(p, buffer, buffer_size);
     if (rr->name == NULL)
     {
+        return false;
+    }
+    if (!buffer_boundaries(p, buffer, buffer_size, 10))
+    {
+        printf("Error: Недостаточное количество данных в буфере для чтения полей типа, класса, ttl и rdlength записи.\n");
         return false;
     }
     rr->type = read_u16(*p);
@@ -402,6 +426,13 @@ bool read_rr(struct dns_rr *rr, uint8_t **p, const uint8_t *buffer, size_t buffe
             printf("Error: Ошибка выделения памяти под RDATA для чтения RR, malloc().\n");
             return false;
         }
+        if (!buffer_boundaries(p, buffer, buffer_size, 10))
+        {
+            printf("Error: Недостаточное количество данных в буфере для чтения поля RDATA записи (RDLENGTH = %u).\n", rr->rdlength);
+            free(rr->rdata);
+            rr->rdata = NULL;
+            return false;
+        }
         memcpy(rr->rdata, *p, rr->rdlength);
         *p += rr->rdlength;
     }
@@ -412,7 +443,6 @@ bool read_rr(struct dns_rr *rr, uint8_t **p, const uint8_t *buffer, size_t buffe
     return true;
 }
 
-// TODO: Сделать проверку на выход за границы буфера
 //  Читает из буфера полученное dns-сообщение и записывает в структуру recv_message. В случае успеха возвращает 1
 bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffer_size)
 {
@@ -488,6 +518,11 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
         {
             return false;
         }
+        if (!buffer_boundaries(p, buffer, buffer_size, 4))
+        {
+            printf("Error: Недостаточное количество данных в буфере для чтения типа и класса записи в секции question.\n");
+            return false;
+        }
         message->questions[i].type = read_u16(p);
         p += 2;
         message->questions[i].class = read_u16(p);
@@ -554,7 +589,7 @@ bool output_rr(const struct dns_rr *rr)
 void output_dns_message(struct dns_message *message)
 {
     printf("Transaction ID = 0x%04x \n", (unsigned int)message->id);
-    printf("\nFlags = 0x%04x: \nQR = %u \nOpCode =  %u%u%u%u \nAA = %u \nTC = %u \nRD = %u \nRA = %u \nZ  = %u \nAD = %u \nCD = %u \nRCODE =   %u%u%u%u\n", (unsigned int)message->flags, (unsigned int)(message->flags >> 15) & 1, (unsigned int)(message->flags >> 14) & 1, (unsigned int)(message->flags >> 13) & 1, (unsigned int)(message->flags >> 12) & 1, (unsigned int)(message->flags >> 11) & 1, (unsigned int)(message->flags >> 10) & 1, (unsigned int)(message->flags >> 9) & 1, (unsigned int)(message->flags >> 8) & 1, (unsigned int)(message->flags >> 7) & 1, (unsigned int)(message->flags >> 6) & 1, (unsigned int)(message->flags >> 5) & 1, (unsigned int)(message->flags >> 4) & 1, (unsigned int)(message->flags >> 3) & 1, (unsigned int)(message->flags >> 2) & 1, (unsigned int)(message->flags >> 1) & 1, (unsigned int)(message->flags) & 1);
+    printf("\nFlags = 0x%04x: \nQR = %u \nOpCode = %u%u%u%u \nAA = %u \nTC = %u \nRD = %u \nRA = %u \nZ  = %u \nAD = %u \nCD = %u \nRCODE = %u%u%u%u\n", (unsigned int)message->flags, (unsigned int)(message->flags >> 15) & 1, (unsigned int)(message->flags >> 14) & 1, (unsigned int)(message->flags >> 13) & 1, (unsigned int)(message->flags >> 12) & 1, (unsigned int)(message->flags >> 11) & 1, (unsigned int)(message->flags >> 10) & 1, (unsigned int)(message->flags >> 9) & 1, (unsigned int)(message->flags >> 8) & 1, (unsigned int)(message->flags >> 7) & 1, (unsigned int)(message->flags >> 6) & 1, (unsigned int)(message->flags >> 5) & 1, (unsigned int)(message->flags >> 4) & 1, (unsigned int)(message->flags >> 3) & 1, (unsigned int)(message->flags >> 2) & 1, (unsigned int)(message->flags >> 1) & 1, (unsigned int)(message->flags) & 1);
     // Вывожу значение поля RCODE
     uint8_t rcode_id = (message->flags) & 0b00001111;
     if (rcode_type[rcode_id] != NULL)
@@ -789,7 +824,7 @@ int main(int argc, char **argv)
     uint8_t send_buffer[512];
 
     // Заполняет буфер отправляемого сообщения по содержимого структуры dns-сообщения. Возвращает размер заполненного буфера (DNS-сообщения)
-    size_t send_message_len = build_dns_message(&send_message, send_buffer, sizeof(send_buffer));
+    size_t send_message_len = build_dns_message(&send_message, send_buffer);
     if (send_message_len == 0)
     {
         return EXIT_FAILURE;
