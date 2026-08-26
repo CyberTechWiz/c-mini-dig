@@ -1,8 +1,5 @@
 // gcc mini-dig.c -o mini-dig
-// TODO: Добавить поддержку IPv6
 // TODO: Добавить новые типы запросов (в первую очередь NS)
-// TODO: Добавить получение адреса локального резолвера системы
-// TODO: Добавить рандомную генерацию Transaction ID
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -11,6 +8,7 @@
 #include <sys/time.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <fcntl.h>
 
 // Структура записи из секции Question
 struct dns_question
@@ -87,9 +85,10 @@ const char *query_type_to_str(uint8_t type)
 // То, что ввел user
 struct config
 {
-    const char *server; // const, чтобы нельзя было изменить символы строк
+    char *server; // const, чтобы нельзя было изменить символы строк
     char *domain_name;
     enum query_type type;
+    int family;
 };
 
 // Функци для чтения и записи в буфера. Можно было передавать им не указатель, а указатель на указатель, чтобы они его могли двигать, но это лишит их универсальности
@@ -127,6 +126,7 @@ bool buffer_boundaries(const uint8_t *p, const uint8_t *buffer, size_t buffer_si
     return (((size_t)(p - buffer) + required_byte_count) <= buffer_size);
 }
 
+// Освобожаю память, выделенную под сообщения и под секции
 void free_dns_message(struct dns_message *message)
 {
     if (message->questions != NULL)
@@ -134,8 +134,10 @@ void free_dns_message(struct dns_message *message)
         for (size_t i = 0; i < message->qdcount; i++)
         {
             free(message->questions[i].name);
+            message->questions[i].name = NULL;
         }
         free(message->questions);
+        message->questions = NULL;
     }
     if (message->answers != NULL)
     {
@@ -143,8 +145,11 @@ void free_dns_message(struct dns_message *message)
         {
             free(message->answers[i].name);
             free(message->answers[i].rdata);
+            message->answers[i].name = NULL;
+            message->answers[i].rdata = NULL;
         }
         free(message->answers);
+        message->answers = NULL;
     }
     if (message->authority != NULL)
     {
@@ -152,8 +157,11 @@ void free_dns_message(struct dns_message *message)
         {
             free(message->authority[i].name);
             free(message->authority[i].rdata);
+            message->authority[i].name = NULL;
+            message->authority[i].rdata = NULL;
         }
         free(message->authority);
+        message->authority = NULL;
     }
     if (message->additional != NULL)
     {
@@ -161,8 +169,11 @@ void free_dns_message(struct dns_message *message)
         {
             free(message->additional[i].name);
             free(message->additional[i].rdata);
+            message->additional[i].name = NULL;
+            message->additional[i].rdata = NULL;
         }
         free(message->additional);
+        message->additional = NULL;
     }
 }
 
@@ -174,7 +185,7 @@ bool write_domain_name(uint8_t **p, const char *name)
     // label перемещается по целому имени
     const char *pos = name;
     const char *label = name;
-    size_t max_full_name_len = 0; // Хранит длину целого доменного имени
+    size_t wire_name_len = 0; // Хранит длину целого доменного имени
     while (*pos != '\0')
     {
         if (*pos != '.')
@@ -189,8 +200,8 @@ bool write_domain_name(uint8_t **p, const char *name)
             printf("Error: Длина каждого лейбла в domain name не должна превышать 63 символа\n");
             return false;
         }
-        max_full_name_len = max_full_name_len + (pos - label) + 1;
-        if (max_full_name_len > 255)
+        wire_name_len = wire_name_len + (pos - label) + 1;
+        if (wire_name_len > 255)
         {
             printf("Error: Длина domain name не должна превышать 255 байт.\n");
             return false;
@@ -216,7 +227,7 @@ bool write_domain_name(uint8_t **p, const char *name)
         return false;
     }
 
-    max_full_name_len = max_full_name_len + (pos - label) + 1;
+    wire_name_len = wire_name_len + (pos - label) + 1;
     **p = (uint8_t)(pos - label);
     (*p)++;
     while (pos != label)
@@ -230,7 +241,7 @@ bool write_domain_name(uint8_t **p, const char *name)
     **p = 0;
     (*p)++;
 
-    if (max_full_name_len + 1 > 255)
+    if (wire_name_len + 1 > 255)
     {
         printf("Error: Длина domain name не должна превышать 255 байт.\n");
         return false;
@@ -285,7 +296,6 @@ size_t build_dns_message(const struct dns_message *message, uint8_t *send_buffer
 // *p перемещается по полю Query Name, если встречает compression label, current_p переходит по смещению, а потом p переходит к окончанию compression label
 char *read_domain_name(uint8_t **p, const uint8_t *buffer, size_t buffer_size)
 {
-    // Entire fully qualified domain name is limited to at most 255 characters. 255 chars + '/0' = 256
     char *name = malloc(256);
     if (name == NULL)
     {
@@ -298,6 +308,8 @@ char *read_domain_name(uint8_t **p, const uint8_t *buffer, size_t buffer_size)
     uint8_t *current_p = *p; // Будет переходить по ссылкам
     uint8_t first;           // Будет хранить начало labels
     uint16_t offset;         // Будет хранить смещение из compression label
+
+    size_t compression_jumps = 0; // кол-во переходов по ссылкам
     // Хранит текущее состояние
     bool compressed = false;
 
@@ -328,10 +340,10 @@ char *read_domain_name(uint8_t **p, const uint8_t *buffer, size_t buffer_size)
         if ((first & 0b11000000) == 0b11000000)
         {
             // Проверка на то, чтобы следующий байт ссылки не был за границами массива
-            if (current_p + 1 >= buffer + buffer_size)
+            if (!buffer_boundaries(current_p, buffer, buffer_size, 2))
             {
                 free(name);
-                printf("Error: Указатель вышел за пределы буфера полученного DNS-ответа, read_domain_name()\n");
+                printf("Error: Недостаточно данных для чтения compression label, read_domain_name()\n");
                 return NULL;
             }
             // (current_p[0] & 0b00111111) - стираю служебные биты в первом байте, чтобы осталась только часть, отвечающая за смещение
@@ -342,9 +354,24 @@ char *read_domain_name(uint8_t **p, const uint8_t *buffer, size_t buffer_size)
             if (offset >= buffer_size)
             {
                 free(name);
-                printf("Error: Compression label идёт за пределы буфера полученного DNS-ответа, read_domain_name()\n");
+                printf("Error: Некорректный compression label: ссылка ведёт за пределы буфера полученного DNS-ответа, read_domain_name()\n");
                 return NULL;
             }
+
+            if (offset >= (size_t)(current_p - buffer))
+            {
+                free(name);
+                printf("Error: Некорректный compression label: ссылка не указывает назад, read_domain_name()\n");
+                return NULL;
+            }
+
+            if (++compression_jumps > 255)
+            {
+                free(name);
+                printf("Error: Слишком много переходов по compression label, read_domain_name()\n");
+                return NULL;
+            }
+
             // Если это не вложенная ссылка, то выставляю флаг перехода по ссылке
             if (!compressed)
             {
@@ -387,6 +414,13 @@ char *read_domain_name(uint8_t **p, const uint8_t *buffer, size_t buffer_size)
             return NULL;
         }
 
+        if (!buffer_boundaries(current_p + 1, buffer, buffer_size, label_len))
+        {
+            printf("Error: Недостаточно данных в буфере для чтения label, read_domain_name()\n");
+            free(name);
+            return NULL;
+        }
+
         memcpy(name + name_len, current_p + 1, label_len);
         name_len += label_len;
         current_p++;            // пропускаю кол-во символов в label
@@ -404,7 +438,7 @@ bool read_rr(struct dns_rr *rr, uint8_t **p, const uint8_t *buffer, size_t buffe
     {
         return false;
     }
-    if (!buffer_boundaries(p, buffer, buffer_size, 10))
+    if (!buffer_boundaries(*p, buffer, buffer_size, 10))
     {
         printf("Error: Недостаточное количество данных в буфере для чтения полей типа, класса, ttl и rdlength записи.\n");
         return false;
@@ -420,17 +454,17 @@ bool read_rr(struct dns_rr *rr, uint8_t **p, const uint8_t *buffer, size_t buffe
 
     if (rr->rdlength > 0)
     {
-        rr->rdata = malloc(rr->rdlength);
-        if (rr->rdata == NULL)
-        {
-            printf("Error: Ошибка выделения памяти под RDATA для чтения RR, malloc().\n");
-            return false;
-        }
-        if (!buffer_boundaries(p, buffer, buffer_size, 10))
+        if (!buffer_boundaries(*p, buffer, buffer_size, rr->rdlength))
         {
             printf("Error: Недостаточное количество данных в буфере для чтения поля RDATA записи (RDLENGTH = %u).\n", rr->rdlength);
             free(rr->rdata);
             rr->rdata = NULL;
+            return false;
+        }
+        rr->rdata = malloc(rr->rdlength);
+        if (rr->rdata == NULL)
+        {
+            printf("Error: Ошибка выделения памяти под RDATA для чтения RR, malloc().\n");
             return false;
         }
         memcpy(rr->rdata, *p, rr->rdlength);
@@ -478,6 +512,7 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
 
         if (message->questions == NULL)
         {
+            free_dns_message(message);
             printf("Error: Ошибка выделения памяти под Question Section в DNS-ответе, malloc(). Количество записей в секции: QDCOUNT = %u \n", message->qdcount);
             return false;
         }
@@ -487,6 +522,7 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
         message->answers = calloc(message->ancount, sizeof(struct dns_rr));
         if (message->answers == NULL)
         {
+            free_dns_message(message);
             printf("Error: Ошибка выделения памяти под Answer Section в DNS-ответе, malloc(). Количество записей в секции: ANCOUNT = %u \n", message->ancount);
             return false;
         }
@@ -496,6 +532,7 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
         message->authority = calloc(message->nscount, sizeof(struct dns_rr));
         if (message->authority == NULL)
         {
+            free_dns_message(message);
             printf("Error: Ошибка выделения памяти под Authority Section в DNS-ответе, malloc(). Количество записей в секции: NSCOUNT = %u \n", message->nscount);
             return false;
         }
@@ -505,6 +542,7 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
         message->additional = calloc(message->arcount, sizeof(struct dns_rr));
         if (message->additional == NULL)
         {
+            free_dns_message(message);
             printf("Error: Ошибка выделения памяти под Additional Information Section в DNS-ответе, malloc(). Количество записей в секции: ARCOUNT = %u \n", message->arcount);
             return false;
         }
@@ -516,10 +554,12 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
         message->questions[i].name = read_domain_name(&p, buffer, buffer_size);
         if (message->questions[i].name == NULL)
         {
+            free_dns_message(message);
             return false;
         }
         if (!buffer_boundaries(p, buffer, buffer_size, 4))
         {
+            free_dns_message(message);
             printf("Error: Недостаточное количество данных в буфере для чтения типа и класса записи в секции question.\n");
             return false;
         }
@@ -532,6 +572,7 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
     {
         if (!read_rr(&message->answers[i], &p, buffer, buffer_size))
         {
+            free_dns_message(message);
             return false;
         }
     }
@@ -539,6 +580,7 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
     {
         if (!read_rr(&message->authority[i], &p, buffer, buffer_size))
         {
+            free_dns_message(message);
             return false;
         }
     }
@@ -546,13 +588,14 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
     {
         if (!read_rr(&message->additional[i], &p, buffer, buffer_size))
         {
+            free_dns_message(message);
             return false;
         }
     }
     return true;
 }
 
-bool output_rr(const struct dns_rr *rr)
+void output_rr(const struct dns_rr *rr)
 {
     char ip_addr[INET6_ADDRSTRLEN];
     int family;
@@ -592,9 +635,17 @@ void output_dns_message(struct dns_message *message)
     printf("\nFlags = 0x%04x: \nQR = %u \nOpCode = %u%u%u%u \nAA = %u \nTC = %u \nRD = %u \nRA = %u \nZ  = %u \nAD = %u \nCD = %u \nRCODE = %u%u%u%u\n", (unsigned int)message->flags, (unsigned int)(message->flags >> 15) & 1, (unsigned int)(message->flags >> 14) & 1, (unsigned int)(message->flags >> 13) & 1, (unsigned int)(message->flags >> 12) & 1, (unsigned int)(message->flags >> 11) & 1, (unsigned int)(message->flags >> 10) & 1, (unsigned int)(message->flags >> 9) & 1, (unsigned int)(message->flags >> 8) & 1, (unsigned int)(message->flags >> 7) & 1, (unsigned int)(message->flags >> 6) & 1, (unsigned int)(message->flags >> 5) & 1, (unsigned int)(message->flags >> 4) & 1, (unsigned int)(message->flags >> 3) & 1, (unsigned int)(message->flags >> 2) & 1, (unsigned int)(message->flags >> 1) & 1, (unsigned int)(message->flags) & 1);
     // Вывожу значение поля RCODE
     uint8_t rcode_id = (message->flags) & 0b00001111;
-    if (rcode_type[rcode_id] != NULL)
+    if (rcode_id <= 10) // Чтобы не выйти за границы созданного мной массива rcode_type
     {
-        printf("RCODE = %d: %s\n", rcode_id, rcode_type[rcode_id]);
+
+        if (rcode_type[rcode_id] != NULL)
+        {
+            printf("RCODE = %d: %s\n", rcode_id, rcode_type[rcode_id]);
+        }
+        else
+        {
+            printf("Unknown RCODE %d\n", rcode_id);
+        }
     }
     else
     {
@@ -655,17 +706,191 @@ void output_dns_message(struct dns_message *message)
     }
 }
 
+bool get_system_DNS_server(char *server)
+{
+    FILE *fp;
+    char line[11 + INET6_ADDRSTRLEN];
+    fp = fopen("/etc/resolv.conf", "r");
+    if (fp == NULL)
+    {
+        perror("Ошибка открытия файла");
+        return false;
+    }
+    // fgets считывает строку до символа \n или конца файла. В конец строки добавляет \0
+    // fgets принимает макисмальный размер буфера и не допускает выход за границы
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+        if ((line[0] == '#') || (line[0] == '\n'))
+        {
+            continue;
+        }
+        if (strncmp(line, "nameserver ", 11) == 0)
+        {
+            strcpy(server, line + 11);
+            server[strcspn(server, "\n")] = '\0';
+            fclose(fp);
+            return true;
+        }
+    }
+    fclose(fp);
+    return false;
+}
+
+// Определить тип адреса: ipv4 или ipv6
+int identify_ip_type(const char *ip_str)
+{
+    if (ip_str == NULL || *ip_str == '\0')
+    {
+        return 0;
+    }
+    if (strchr(ip_str, ':') != NULL)
+    {
+        return AF_INET6;
+    }
+    if (strchr(ip_str, '.') != NULL)
+    {
+        return AF_INET;
+    }
+    return 0;
+}
+
+// Адрес DNS-сервера
+// Создаю структуру - адрес сокета. (см. содержимое  структуры sockaddr_in в man)
+// sockaddr_in - IPv4 Socket Address Structure, defined by including the <netinet/in.h> header.
+// memset - Очищаю память структуры адреса сокета. Параметры: указатель на начало структуры, хранит адрес, 0 - все байты структуры станут равны нулю, sizeof вычисляет размер структуры в байтах
+// inet_pton преобразует строку с адресом в сетевой формат и сохраняет результат в структуре типа in_addr
+struct sockaddr *create_addr(const char *ip_str, uint16_t port, int family, socklen_t *addr_len)
+{
+    // Проверка на то, что спустя миллион проверок в config.server все еще хранится корректный адрес
+    if (ip_str == NULL || *ip_str == '\0')
+    {
+        return NULL;
+    }
+
+    struct sockaddr *server_addr = NULL;
+    switch (family)
+    {
+    case AF_INET:
+    {
+        struct sockaddr_in *server_addr4 = malloc(sizeof(struct sockaddr_in));
+        if (server_addr4 == NULL)
+        {
+            printf("Error: Ошибка выделения памяти для структуры IPv4 адреса (%zu bytes), malloc()\n", sizeof(struct sockaddr_in));
+            return NULL;
+        }
+        memset(server_addr4, 0, sizeof(*server_addr4));
+        server_addr4->sin_family = AF_INET;   // IPv4 protocol family
+        server_addr4->sin_port = htons(port); // htons меняет порядок байтов хоста на Big-Endian (сетевой формат)
+        if (inet_pton(AF_INET, ip_str, &server_addr4->sin_addr) != 1)
+        {
+            fprintf(stderr, "Error: invalid DNS server address.\n");
+            free(server_addr4);
+            return NULL;
+        }
+        server_addr = (struct sockaddr *)server_addr4;
+        *addr_len = sizeof(struct sockaddr_in);
+        break;
+    }
+    case AF_INET6:
+    {
+        struct sockaddr_in6 *server_addr6 = malloc(sizeof(struct sockaddr_in6));
+        if (server_addr6 == NULL)
+        {
+            printf("Error: Ошибка выделения памяти для структуры IPv6 адреса (%zu bytes), malloc()\n", sizeof(struct sockaddr_in6));
+            return NULL;
+        }
+        memset(server_addr6, 0, sizeof(*server_addr6));
+        server_addr6->sin6_family = AF_INET6;
+        server_addr6->sin6_port = htons(port);
+        if (inet_pton(AF_INET6, ip_str, &server_addr6->sin6_addr) != 1)
+        {
+            fprintf(stderr, "Error: invalid DNS server address.\n");
+            free(server_addr6);
+            return NULL;
+        }
+        server_addr = (struct sockaddr *)server_addr6;
+        *addr_len = sizeof(struct sockaddr_in6);
+        break;
+    }
+    default:
+    {
+        printf("Error: invalid DNS server address.\n");
+        return NULL;
+    }
+    }
+    return server_addr;
+}
+
+void output_sender_address(struct sockaddr_storage *addr)
+{
+    char ip_str[INET6_ADDRSTRLEN];
+    uint16_t port;
+
+    switch (addr->ss_family)
+    {
+    case AF_INET:
+    {
+        struct sockaddr_in *addr4 = (struct sockaddr_in *)addr;
+                port = ntohs(addr4->sin_port);
+        if (inet_ntop(AF_INET, &addr4->sin_addr, ip_str, sizeof(ip_str)) != NULL)
+        {
+            printf("Отправитель (IPv4): %s. Порт отправителя: %u\n", ip_str, port);
+        }
+        break;
+    }
+
+    case AF_INET6:
+    {
+        struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)addr;
+        port = ntohs(addr6->sin6_port);
+        if (inet_ntop(AF_INET6, &addr6->sin6_addr, ip_str, sizeof(ip_str)) != NULL)
+        {
+            printf("Отправитель (IPv6): %s. Порт отправителя: %u\n", ip_str, port);
+        }
+        break;
+    }
+    default:
+    {
+        printf("Неизвестное семейство адресов: %d\n", addr->ss_family);
+        break;
+    }
+    }
+}
+
+// Случайная генерация для поля transaction id (кому нужен этот getrandom())
+// Функция получает 2 байта из системного генератора случайных чисел Linux
+bool generate_transaction_id(uint16_t *id)
+{
+    /// dev/urandom предоставляет данные из криптографически стойкого генератора случайных данных операционной системы.
+    int fd = open("/dev/urandom", O_RDONLY); // Open Read Only — открыть только для чтения.
+    if (fd == -1)
+    {
+        perror("Error: Не удалось открыть /dev/urandom. В заголовке будет использоваться Transaction ID = 0x1234. generate_transaction_id()\n");
+        return false;
+    }
+
+    ssize_t result = read(fd, id, sizeof(*id));
+    close(fd);
+    // Если по какой-то причине прочитано не 2 байта для id
+    if (result != sizeof(*id))
+    {
+        printf("Error: Не удалось получить случайный Transaction ID. В заголовке будет использоваться Transaction ID = 0x1234. generate_transaction_id()\n");
+        return false;
+    }
+
+    return true;
+}
+
 // Выводит mini guide на mini pig
 void print_guide()
 {
     printf("Запуск утилиты выглядит так:\n");
     printf("./mini-dig <server> <domain> <type>.\n");
-    printf("<server> - IPv4 адрес DNS-сервера, которому будет отправлен запрос. Должен начинаться с символа '@'. Поставьте дифис чтобы был выбран dns-сервер системы.\n");
+    printf("<server> - IPv4 адрес DNS-сервера, которому будет отправлен запрос. Должен начинаться с символа '@'. Поставьте дифис чтобы был выбран dns-сервер системы (будет прочитан первый из файла /etc/resolv.conf).\n");
     printf("<domain> - domain, о котором нужно найти информацию. Поставьте дефис чтобы был выбран домен example.com\n");
     printf("<type> - тип запроса: А - запрос IPv4 адреса для domain или АААА - запрос IPv6 адреса для domain. Поставьте дефис чтобы был выбран A.\n");
     printf("Пример запуска:\n");
     printf("./mini-dig @8.8.8.8 google.com A\n");
-    printf("(Программа может обработать compression label на весь domain name, Но в случае мешанины из data label и compression label будет выведен некорретный domain name).\n");
 }
 
 // выводит буфер приема/получения в терминал для отладки
@@ -707,8 +932,14 @@ int main(int argc, char **argv)
     // argv[1] - указатель на вторую строку массива, argv[1][0] - первый символ этой строки, *argv[1] то же самое, что и argv[1][0]
     if (argv[1][0] == '-')
     {
-        printf("Для отправки DNS-запроса выбран DNS-сервер системы.\n");
-        config.server = NULL;
+        char server[INET6_ADDRSTRLEN]; // инициализирую указатель нормальным адресом
+        config.server = server;
+        if (!get_system_DNS_server(config.server))
+        {
+            printf("Ошибка чтения DNS сервера системы.");
+            return EXIT_FAILURE;
+        }
+        printf("Выбран DNS-сервер системы. Прочитанный DNS-сервер: %s\n", config.server);
     }
     else if (argv[1][0] == '@')
     {
@@ -756,18 +987,25 @@ int main(int argc, char **argv)
         {
             printf("Error: Аргументы командной строки: тип запроса неверен.\n");
             print_guide();
+
             return EXIT_FAILURE;
         }
     }
 
     // Создаю сокет
     // Socket function returns a file descriptor (sockfd)
-    // AF_INET - IPv4 protocol family, datagram - stream socket type, 0 - system's default protocol augment
-    int sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    // datagram - stream socket type, 0 - system's default protocol augment
+    config.family = identify_ip_type(config.server);
+    if (config.family == 0)
+    {
+        printf("Не удалось определить тип IP-адреса");
+        return EXIT_FAILURE;
+    }
+    int sock_fd = socket(config.family, SOCK_DGRAM, 0);
     if (sock_fd < 0)
     {
         perror("Error: Ошибка создания сокета :( socket().\n");
-        return -1;
+        return EXIT_FAILURE;
     }
     printf("Сокет создан успешно. Номер сокета: %d\n", sock_fd);
 
@@ -784,22 +1022,16 @@ int main(int argc, char **argv)
     if (result_of_call_int == -1)
     {
         perror("Error: Не удалось модифицировать сокет для таймаута, setsockopt().\n");
+        close(sock_fd);
         return EXIT_FAILURE;
     }
 
-    // Пока что поддержка только IPv4
-    // Адрес DNS-сервера
-    // Создаю структуру - адрес сокета. (см. содержимое  структуры sockaddr_in в man)
-    struct sockaddr_in server_addr;
-    // sockaddr_in - IPv4 Socket Address Structure, defined by including the <netinet/in.h> header.
-    // Очищаю память структуры адреса сокета. Параметры: указатель на начало структуры, хранит адрес, 0 - все байты структуры станут равны нулю, sizeof вычисляет размер структуры в байтах
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET; // IPv4 protocol family
-    server_addr.sin_port = htons(53); // htons меняет порядок байтов хоста на Big-Endian (сетевой формат)
-    // inet_aton преобразует строку с адресом в сетевой формат и сохраняет результат в структуре типа in_addr
-    if (inet_aton(config.server, &server_addr.sin_addr) != 1)
-    { // htonl переводит long в Big-Endian, но для 0.0.0.0 это необязатьно
-        fprintf(stderr, "Error: invalid DNS server address.\n");
+    // Создаю универсальную структуру адреса, которую вернет после приведения типа функция динамически создающая нужную структуру (для поддержки IPv4 и IPv6 одновременно)
+    socklen_t addr_len; // Нужно будет передать в sendto(), так как размер адреса зависит от структуры sockaddr_in или sockaddr_in6
+    struct sockaddr *server_addr = create_addr(config.server, 53, config.family, &addr_len);
+    if (server_addr == NULL)
+    {
+        close(sock_fd);
         return EXIT_FAILURE;
     }
 
@@ -810,7 +1042,10 @@ int main(int argc, char **argv)
     send_questions.name = config.domain_name;
 
     struct dns_message send_message; // Сначала заполняю структуру dns сообщения
-    send_message.id = 0x1234;
+    if (!generate_transaction_id(&send_message.id))
+    {
+        send_message.id = 0x1234;
+    }
     send_message.flags = 0b0000000100000000; // QR = 0, RD = 1
     send_message.qdcount = 1;
     send_message.ancount = 0;
@@ -827,6 +1062,8 @@ int main(int argc, char **argv)
     size_t send_message_len = build_dns_message(&send_message, send_buffer);
     if (send_message_len == 0)
     {
+        free(server_addr);
+        close(sock_fd);
         return EXIT_FAILURE;
     }
 
@@ -838,10 +1075,12 @@ int main(int argc, char **argv)
     printf("\n");
 
     // Отправка dns запроса (см. man sendto)
-    result_of_call_bytes_ssize_t = sendto(sock_fd, send_buffer, send_message_len, 0, (struct sockaddr *)&server_addr, sizeof(server_addr));
+    result_of_call_bytes_ssize_t = sendto(sock_fd, send_buffer, send_message_len, 0, server_addr, addr_len);
     if (result_of_call_bytes_ssize_t == -1)
     {
         perror("Error: Сообщение не отправлено. sendto().\n");
+        free(server_addr);
+        close(sock_fd);
         return EXIT_FAILURE;
     }
     if (result_of_call_bytes_ssize_t < send_message_len)
@@ -858,22 +1097,29 @@ int main(int argc, char **argv)
     }
 
     uint8_t recieve_buffer[512];
-    socklen_t addr_len = sizeof(server_addr);
     // Получение ответа
-    result_of_call_bytes_ssize_t = recvfrom(sock_fd, recieve_buffer, 512, 0, (struct sockaddr *)&server_addr, &addr_len);
+    struct sockaddr_storage recv_addr;
+    socklen_t recv_addr_len = sizeof(recv_addr);
+    result_of_call_bytes_ssize_t = recvfrom(sock_fd, recieve_buffer, 512, 0, (struct sockaddr *)&recv_addr, &recv_addr_len);
     if (result_of_call_bytes_ssize_t == -1)
     {
         perror("Error: Не удалось получить датаграммку. recvfrom().\n");
+        free(server_addr);
+        close(sock_fd);
         return EXIT_FAILURE;
     }
 
     if (result_of_call_bytes_ssize_t < 12)
     {
         perror("Error: DNS-сообщение оказалось короче 12 байт (У DNS-сообщений фиксированный заголовок размером 12 байт). recvfrom().\n");
+        free(server_addr);
+        close(sock_fd);
         return EXIT_FAILURE;
     }
 
     printf("\nDNS-ответ получен: %zd байт\n", result_of_call_bytes_ssize_t);
+    // Выводит адрес и порт отправителя
+    output_sender_address(&recv_addr);
 
     printf("\nReceived buffer: \n");
     hex_dump(recieve_buffer, result_of_call_bytes_ssize_t);
@@ -886,7 +1132,8 @@ int main(int argc, char **argv)
     // Вызываю функцию для чтения dns-сообщения
     if (!read_dns_message(&recv_message, recieve_buffer, result_of_call_bytes_ssize_t))
     {
-        free_dns_message(&recv_message);
+        free(server_addr);
+        close(sock_fd);
         return EXIT_FAILURE;
     }
 
@@ -900,5 +1147,7 @@ int main(int argc, char **argv)
     output_dns_message(&recv_message);
 
     free_dns_message(&recv_message);
+    free(server_addr);
+    close(sock_fd);
     return EXIT_SUCCESS;
 }
