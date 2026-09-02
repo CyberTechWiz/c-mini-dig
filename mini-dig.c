@@ -27,6 +27,8 @@ struct dns_rr
     uint32_t ttl;
     uint16_t rdlength;
     uint8_t *rdata;
+
+    size_t rdata_offset; // Это необходимо для чтения доменных имён в поле данных RR типа NS (Как же надоели уже эти ссылки)
 };
 
 // Структура DNS сообщения
@@ -51,8 +53,44 @@ struct dns_message
 enum query_type
 {
     DNS_A = 1,
-    DNS_AAAA = 28
+    DNS_AAAA = 28,
+    DNS_NS = 2
 };
+
+// Функция возвращает строку в зависимости от типа
+const char *query_type_to_str(uint8_t type)
+{
+    switch (type)
+    {
+    case DNS_A:
+        return "A";
+    case DNS_AAAA:
+        return "AAAA";
+    case DNS_NS:
+        return "NS";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+// Функция возвращает тип в зависимости от строки
+enum query_type str_to_query_type(char *arg)
+{
+    if (strcmp(arg, "A") == 0)
+    {
+        return DNS_A;
+    }
+    if (strcmp(arg, "AAAA") == 0)
+    {
+        return DNS_AAAA;
+    }
+    if (strcmp(arg, "NS") == 0)
+    {
+        return DNS_NS;
+    }
+
+    return 0;
+}
 
 // RCODE Type
 const char *rcode_type[] = {
@@ -67,20 +105,6 @@ const char *rcode_type[] = {
     "RRSet does not exist but should (used with updates).",
     "Server not authorized for zone (used with updates).",
     "Name not contained in zone (used with updates)."};
-
-// Функция возвращает строку в зависимости от типа
-const char *query_type_to_str(uint8_t type)
-{
-    switch (type)
-    {
-    case DNS_A:
-        return "A";
-    case DNS_AAAA:
-        return "AAAA";
-    default:
-        return "UNKNOWN";
-    }
-}
 
 // То, что ввел user
 struct config
@@ -438,6 +462,7 @@ bool read_rr(struct dns_rr *rr, uint8_t **p, const uint8_t *buffer, size_t buffe
     {
         return false;
     }
+
     if (!buffer_boundaries(*p, buffer, buffer_size, 10))
     {
         printf("Error: Недостаточное количество данных в буфере для чтения полей типа, класса, ttl и rdlength записи.\n");
@@ -451,6 +476,9 @@ bool read_rr(struct dns_rr *rr, uint8_t **p, const uint8_t *buffer, size_t buffe
     *p += 4;
     rr->rdlength = read_u16(*p);
     *p += 2;
+
+    // Начало поля данных относительно начала dns-сообщения
+    rr->rdata_offset = (size_t)(*p - buffer);
 
     if (rr->rdlength > 0)
     {
@@ -595,10 +623,11 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
     return true;
 }
 
-void output_rr(const struct dns_rr *rr)
+void output_rr(const struct dns_rr *rr, const uint8_t *buffer, size_t buffer_size)
 {
     char ip_addr[INET6_ADDRSTRLEN];
-    int family;
+    char *ns_name = NULL;
+    uint8_t *p;
     switch (rr->type)
     {
     case DNS_A:
@@ -606,30 +635,68 @@ void output_rr(const struct dns_rr *rr)
         {
             printf("Warning: Значение rdlength не соответсвует ожидаемому значению для типа записи А!\n");
         }
-        family = AF_INET;
+        if (inet_ntop(AF_INET, rr->rdata, ip_addr, sizeof(ip_addr)) == NULL)
+        {
+            printf("Error: Ошибка перевода IP-адреса из сетевого в текстовый формат, inet_ntop().\n");
+            printf("%-30s %-6s %-6u %-10u %-10u\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength);
+        }
+        else
+        {
+            printf("%-30s %-6s %-6u %-10u %-10u %-39s\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength, ip_addr);
+        }
         break;
     case DNS_AAAA:
         if (rr->rdlength != 16)
         {
             printf("Warning: Значение rdlength не соответсвует ожидаемому значению для типа записи АAAA!\n");
         }
-        family = AF_INET6;
+        if (inet_ntop(AF_INET6, rr->rdata, ip_addr, sizeof(ip_addr)) == NULL)
+        {
+            printf("Error: Ошибка перевода IP-адреса из сетевого в текстовый формат, inet_ntop().\n");
+            printf("%-30s %-6s %-6u %-10u %-10u\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength);
+        }
+        else
+        {
+            printf("%-30s %-6s %-6u %-10u %-10u %-39s\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength, ip_addr);
+        }
+        break;
+    case DNS_NS:
+        if (rr->rdlength == 0)
+        {
+            printf("Warning: Значение rdlength не соответсвует ожидаемому значению для типа записи NS: rdlength = 0!\n");
+            printf("%-30s %-6s %-6u %-10u %-10u\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength);
+            break;
+        }
+
+        if (rr->rdata_offset >= buffer_size)
+        {
+            printf("Error: Некорректное смещение RDATA записи NS.\n");
+            printf("%-30s %-6s %-6u %-10u %-10u\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength);
+            break;
+        }
+
+        p = (uint8_t *)buffer + rr->rdata_offset;
+
+        ns_name = read_domain_name(&p, buffer, buffer_size);
+        if (ns_name == NULL)
+        {
+            printf("Не удалось прочесть поле name в RR типа NS\n");
+            printf("%-30s %-6s %-6u %-10u %-10u\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength);
+        }
+        else
+        {
+            printf("%-30s %-6s %-6u %-10u %-10u %-39s\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength, ns_name);
+            free(ns_name);
+            ns_name = NULL;
+        }
         break;
     default:
         printf("%-30s %-6s %-6u %-10u %-10u\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength);
-    }
-    if (inet_ntop(family, rr->rdata, ip_addr, sizeof(ip_addr)) == NULL)
-    {
-        printf("Ошибка перевода IP-адреса из сетевого в текстовый формат, inet_ntop().\n");
-        printf("%-30s %-6s %-6u %-10u %-10u\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength);
-    }
-    else
-    {
-        printf("%-30s %-6s %-6u %-10u %-10u %-39s\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength, ip_addr);
+        break;
     }
 }
 
-void output_dns_message(struct dns_message *message)
+void output_dns_message(struct dns_message *message, const uint8_t *buffer, size_t buffer_size)
 {
     printf("Transaction ID = 0x%04x \n", (unsigned int)message->id);
     printf("\nFlags = 0x%04x: \nQR = %u \nOpCode = %u%u%u%u \nAA = %u \nTC = %u \nRD = %u \nRA = %u \nZ  = %u \nAD = %u \nCD = %u \nRCODE = %u%u%u%u\n", (unsigned int)message->flags, (unsigned int)(message->flags >> 15) & 1, (unsigned int)(message->flags >> 14) & 1, (unsigned int)(message->flags >> 13) & 1, (unsigned int)(message->flags >> 12) & 1, (unsigned int)(message->flags >> 11) & 1, (unsigned int)(message->flags >> 10) & 1, (unsigned int)(message->flags >> 9) & 1, (unsigned int)(message->flags >> 8) & 1, (unsigned int)(message->flags >> 7) & 1, (unsigned int)(message->flags >> 6) & 1, (unsigned int)(message->flags >> 5) & 1, (unsigned int)(message->flags >> 4) & 1, (unsigned int)(message->flags >> 3) & 1, (unsigned int)(message->flags >> 2) & 1, (unsigned int)(message->flags >> 1) & 1, (unsigned int)(message->flags) & 1);
@@ -671,7 +738,7 @@ void output_dns_message(struct dns_message *message)
         printf("%-30s %-6s %-6s %-10s %-10s %-39s\n", "Name", "Type", "Class", "TTL", "RDLENGTH", "RDATA");
         for (uint16_t i = 0; i < message->ancount; i++)
         {
-            output_rr(&message->answers[i]);
+            output_rr(&message->answers[i], buffer, buffer_size);
         }
     }
     else
@@ -684,7 +751,7 @@ void output_dns_message(struct dns_message *message)
         printf("%-30s %-6s %-6s %-10s %-10s %-39s\n", "Name", "Type", "Class", "TTL", "RDLENGTH", "RDATA");
         for (uint16_t i = 0; i < message->nscount; i++)
         {
-            output_rr(&message->authority[i]);
+            output_rr(&message->authority[i], buffer, buffer_size);
         }
     }
     else
@@ -697,7 +764,7 @@ void output_dns_message(struct dns_message *message)
         printf("%-30s %-6s %-6s %-10s %-10s %-39s\n", "Name", "Type", "Class", "TTL", "RDLENGTH", "RDATA");
         for (uint16_t i = 0; i < message->arcount; i++)
         {
-            output_rr(&message->additional[i]);
+            output_rr(&message->additional[i], buffer, buffer_size);
         }
     }
     else
@@ -831,7 +898,7 @@ void output_sender_address(struct sockaddr_storage *addr)
     case AF_INET:
     {
         struct sockaddr_in *addr4 = (struct sockaddr_in *)addr;
-                port = ntohs(addr4->sin_port);
+        port = ntohs(addr4->sin_port);
         if (inet_ntop(AF_INET, &addr4->sin_addr, ip_str, sizeof(ip_str)) != NULL)
         {
             printf("Отправитель (IPv4): %s. Порт отправителя: %u\n", ip_str, port);
@@ -888,7 +955,7 @@ void print_guide()
     printf("./mini-dig <server> <domain> <type>.\n");
     printf("<server> - IPv4 адрес DNS-сервера, которому будет отправлен запрос. Должен начинаться с символа '@'. Поставьте дифис чтобы был выбран dns-сервер системы (будет прочитан первый из файла /etc/resolv.conf).\n");
     printf("<domain> - domain, о котором нужно найти информацию. Поставьте дефис чтобы был выбран домен example.com\n");
-    printf("<type> - тип запроса: А - запрос IPv4 адреса для domain или АААА - запрос IPv6 адреса для domain. Поставьте дефис чтобы был выбран A.\n");
+    printf("<type> - тип запроса. Поддерживаемые типы запроса: A, AAAA, NS. Поставьте дефис чтобы был выбран A.\n");
     printf("Пример запуска:\n");
     printf("./mini-dig @8.8.8.8 google.com A\n");
 }
@@ -975,16 +1042,7 @@ int main(int argc, char **argv)
     }
     else
     {
-        if (strcmp(argv[3], "A") == 0)
-        {
-            config.type = DNS_A;
-        }
-        else if (strcmp(argv[3], "AAAA") == 0)
-        {
-            config.type = DNS_AAAA;
-        }
-        else
-        {
+        if ((config.type = str_to_query_type(argv[3])) == 0){
             printf("Error: Аргументы командной строки: тип запроса неверен.\n");
             print_guide();
 
@@ -1144,7 +1202,7 @@ int main(int argc, char **argv)
     }
 
     // Вывожу результат работы программы - полученный DNS-ответ
-    output_dns_message(&recv_message);
+    output_dns_message(&recv_message, recieve_buffer, result_of_call_bytes_ssize_t);
 
     free_dns_message(&recv_message);
     free(server_addr);
