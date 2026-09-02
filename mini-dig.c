@@ -1,5 +1,5 @@
 // gcc mini-dig.c -o mini-dig
-// TODO: Добавить новые типы запросов (в первую очередь NS)
+// TODO: Добавить новые типы запросов
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -58,7 +58,7 @@ enum query_type
 };
 
 // Функция возвращает строку в зависимости от типа
-const char *query_type_to_str(uint8_t type)
+const char *query_type_to_str(uint16_t type)
 {
     switch (type)
     {
@@ -536,6 +536,12 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
     // Выделяю память под структуры (questions - указатель на первый элемент массива структур)
     if (message->qdcount > 0)
     {
+        if (message->qdcount > 30)
+        {
+            printf("Error: Подозрительное количество записей в секции. В UDP датаграммку (512 байт) такое количество записей не влезет >:(  (QDCOUNT = %u)\n", message->qdcount);
+            return false;
+        }
+
         message->questions = calloc(message->qdcount, sizeof(struct dns_question));
 
         if (message->questions == NULL)
@@ -547,6 +553,12 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
     }
     if (message->ancount > 0)
     {
+        if (message->ancount > 30)
+        {
+            printf("Error: Подозрительное количество rr в секции. В UDP датаграммку (512 байт) такое количество rr не влезет >:(  (ANCOUNT = %u) \n", message->ancount);
+            return false;
+        }
+
         message->answers = calloc(message->ancount, sizeof(struct dns_rr));
         if (message->answers == NULL)
         {
@@ -557,6 +569,12 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
     }
     if (message->nscount > 0)
     {
+        if (message->nscount > 30)
+        {
+            printf("Error: Подозрительное количество rr в секции. В UDP датаграммку (512 байт) такое количество rr не влезет >:(  (NSCOUNT = %u) \n", message->nscount);
+            return false;
+        }
+
         message->authority = calloc(message->nscount, sizeof(struct dns_rr));
         if (message->authority == NULL)
         {
@@ -567,6 +585,12 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
     }
     if (message->arcount > 0)
     {
+        if (message->arcount > 30)
+        {
+            printf("Error: Подозрительное количество rr в секции. В UDP датаграммку (512 байт) такое количество rr не влезет >:(  (ARCOUNT = %u) \n", message->arcount);
+            return false;
+        }
+
         message->additional = calloc(message->arcount, sizeof(struct dns_rr));
         if (message->additional == NULL)
         {
@@ -888,7 +912,7 @@ struct sockaddr *create_addr(const char *ip_str, uint16_t port, int family, sock
     return server_addr;
 }
 
-void output_sender_address(struct sockaddr_storage *addr)
+void output_sender_address(struct sockaddr_storage *addr, char *send_server_addr)
 {
     char ip_str[INET6_ADDRSTRLEN];
     uint16_t port;
@@ -901,7 +925,7 @@ void output_sender_address(struct sockaddr_storage *addr)
         port = ntohs(addr4->sin_port);
         if (inet_ntop(AF_INET, &addr4->sin_addr, ip_str, sizeof(ip_str)) != NULL)
         {
-            printf("Отправитель (IPv4): %s. Порт отправителя: %u\n", ip_str, port);
+            printf("Отправитель (IPv4): %s, порт отправителя: %u\n", ip_str, port);
         }
         break;
     }
@@ -912,7 +936,7 @@ void output_sender_address(struct sockaddr_storage *addr)
         port = ntohs(addr6->sin6_port);
         if (inet_ntop(AF_INET6, &addr6->sin6_addr, ip_str, sizeof(ip_str)) != NULL)
         {
-            printf("Отправитель (IPv6): %s. Порт отправителя: %u\n", ip_str, port);
+            printf("Отправитель (IPv6): %s, порт отправителя: %u\n", ip_str, port);
         }
         break;
     }
@@ -921,6 +945,11 @@ void output_sender_address(struct sockaddr_storage *addr)
         printf("Неизвестное семейство адресов: %d\n", addr->ss_family);
         break;
     }
+    }
+    
+    if (strcmp(ip_str, send_server_addr) != 0)
+    {
+        printf("Warning: Сервер, что прислал DNS response не тот, кому DNS rquest был отправлен. Запрос был отправлен к %s, ответ пришел от %s.\n", send_server_addr, ip_str);
     }
 }
 
@@ -1042,7 +1071,8 @@ int main(int argc, char **argv)
     }
     else
     {
-        if ((config.type = str_to_query_type(argv[3])) == 0){
+        if ((config.type = str_to_query_type(argv[3])) == 0)
+        {
             printf("Error: Аргументы командной строки: тип запроса неверен.\n");
             print_guide();
 
@@ -1177,7 +1207,7 @@ int main(int argc, char **argv)
 
     printf("\nDNS-ответ получен: %zd байт\n", result_of_call_bytes_ssize_t);
     // Выводит адрес и порт отправителя
-    output_sender_address(&recv_addr);
+    output_sender_address(&recv_addr, config.server);
 
     printf("\nReceived buffer: \n");
     hex_dump(recieve_buffer, result_of_call_bytes_ssize_t);
@@ -1199,6 +1229,11 @@ int main(int argc, char **argv)
     if (send_message.id != recv_message.id)
     {
         printf("Полученный DNS-ответ содержит ID-транзакции отличный от отправленного DNS-запроса: ID = %u (был отправлен ID = %u)!\n", (unsigned int)recv_message.id, (unsigned int)send_message.id);
+    }
+
+    if ((recv_message.flags & 0b1000000000000000) == 0)
+    {
+        printf("Warning: Полученный DNS response считает, что он не response, а request (см. флаг QR).\n");
     }
 
     // Вывожу результат работы программы - полученный DNS-ответ
