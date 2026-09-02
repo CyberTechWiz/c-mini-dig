@@ -1,5 +1,6 @@
 // gcc mini-dig.c -o mini-dig
-// TODO: Добавить новые типы запросов
+// TODO: Добавить поддержку новых типов RR
+// TODO: Добавить поддержку TCP и переход на TCP по флагу TC
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -54,7 +55,9 @@ enum query_type
 {
     DNS_A = 1,
     DNS_AAAA = 28,
-    DNS_NS = 2
+    DNS_NS = 2,
+    DNS_CNAME = 5,
+    DNS_SOA = 6
 };
 
 // Функция возвращает строку в зависимости от типа
@@ -68,6 +71,10 @@ const char *query_type_to_str(uint16_t type)
         return "AAAA";
     case DNS_NS:
         return "NS";
+    case DNS_CNAME:
+        return "CNAME";
+    case DNS_SOA:
+        return "SOA";
     default:
         return "UNKNOWN";
     }
@@ -87,6 +94,14 @@ enum query_type str_to_query_type(char *arg)
     if (strcmp(arg, "NS") == 0)
     {
         return DNS_NS;
+    }
+    if (strcmp(arg, "CNAME") == 0)
+    {
+        return DNS_CNAME;
+    }
+    if (strcmp(arg, "SOA") == 0)
+    {
+        return DNS_SOA;
     }
 
     return 0;
@@ -650,7 +665,14 @@ bool read_dns_message(struct dns_message *message, uint8_t *buffer, size_t buffe
 void output_rr(const struct dns_rr *rr, const uint8_t *buffer, size_t buffer_size)
 {
     char ip_addr[INET6_ADDRSTRLEN];
-    char *ns_name = NULL;
+    // Костыльные переменные, которые будут хранит имена и числа изъятые из поля RDATA для последующего вывода в printf
+    char *name_field1 = NULL;
+    char *name_field2 = NULL;
+    uint32_t int_field1;
+    uint32_t int_field2;
+    uint32_t int_field3;
+    uint32_t int_field4;
+    uint32_t int_field5;
     uint8_t *p;
     switch (rr->type)
     {
@@ -701,18 +723,84 @@ void output_rr(const struct dns_rr *rr, const uint8_t *buffer, size_t buffer_siz
 
         p = (uint8_t *)buffer + rr->rdata_offset;
 
-        ns_name = read_domain_name(&p, buffer, buffer_size);
-        if (ns_name == NULL)
+        name_field1 = read_domain_name(&p, buffer, buffer_size);
+        if (name_field1 == NULL)
         {
             printf("Не удалось прочесть поле name в RR типа NS\n");
             printf("%-30s %-6s %-6u %-10u %-10u\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength);
         }
         else
         {
-            printf("%-30s %-6s %-6u %-10u %-10u %-39s\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength, ns_name);
-            free(ns_name);
-            ns_name = NULL;
+            printf("%-30s %-6s %-6u %-10u %-10u %-39s\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength, name_field1);
+            free(name_field1);
+            name_field1 = NULL;
         }
+        break;
+    case DNS_CNAME:
+        if (rr->rdlength == 0)
+        {
+            printf("Warning: Значение rdlength не соответсвует ожидаемому значению для типа записи CNAME: rdlength = 0!\n");
+            printf("%-30s %-6s %-6u %-10u %-10u\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength);
+            break;
+        }
+
+        if (rr->rdata_offset >= buffer_size)
+        {
+            printf("Error: Некорректное смещение RDATA записи CNAME.\n");
+            printf("%-30s %-6s %-6u %-10u %-10u\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength);
+            break;
+        }
+
+        p = (uint8_t *)buffer + rr->rdata_offset;
+
+        name_field1 = read_domain_name(&p, buffer, buffer_size);
+        if (name_field1 == NULL)
+        {
+            printf("Не удалось прочесть name в поле RDATA в RR типа CNAME\n");
+            printf("%-30s %-6s %-6u %-10u %-10u\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength);
+        }
+        else
+        {
+            printf("%-30s %-6s %-6u %-10u %-10u %-39s\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength, name_field1);
+            free(name_field1);
+            name_field1 = NULL;
+        }
+        break;
+    case DNS_SOA:
+        if (rr->rdlength == 0)
+        {
+            printf("Warning: Значение rdlength не соответсвует ожидаемому значению для типа записи SOA: rdlength = 0!\n");
+            printf("%-30s %-6s %-6u %-10u %-10u\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength);
+            break;
+        }
+        p = (uint8_t *)buffer + rr->rdata_offset;
+        name_field1 = read_domain_name(&p, buffer, buffer_size);
+        if (name_field1 == NULL)
+        {
+            printf("Не удалось прочесть первое name в поле RDATA в RR типа SOA\n");
+            name_field1 = "?";
+        }
+        name_field2 = read_domain_name(&p, buffer, buffer_size);
+        if (name_field2 == NULL)
+        {
+            printf("Не удалось прочесть второе name в поле RDATA в RR типа SOA\n");
+            name_field2 = "?";
+        }
+        if (!buffer_boundaries(p, buffer, buffer_size, 16))
+        {
+            printf("Error: Недостаточное количество данных в буфере для чтения RDATA в записи типа SOA.\n");
+            break;
+        }
+        int_field1 = (read_u32(p));
+        p += 4;
+        int_field2 = (read_u32(p));
+        p += 4;
+        int_field3 = (read_u32(p));
+        p += 4;
+        int_field4 = (read_u32(p));
+        p += 4;
+        int_field5 = (read_u32(p));
+        printf("%-30s %-6s %-6u %-10u %-10u -> \nprimary name server = %s\nresponsible mail addr =  %s\nserial = %u\nrefresh = %u\nretry = %u\nexpire = %u\ndefault TTL = %u\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength, name_field1, name_field2, int_field1, int_field2, int_field3, int_field4, int_field5);
         break;
     default:
         printf("%-30s %-6s %-6u %-10u %-10u\n", rr->name, query_type_to_str(rr->type), rr->class, rr->ttl, rr->rdlength);
@@ -946,7 +1034,7 @@ void output_sender_address(struct sockaddr_storage *addr, char *send_server_addr
         break;
     }
     }
-    
+
     if (strcmp(ip_str, send_server_addr) != 0)
     {
         printf("Warning: Сервер, что прислал DNS response не тот, кому DNS rquest был отправлен. Запрос был отправлен к %s, ответ пришел от %s.\n", send_server_addr, ip_str);
@@ -984,7 +1072,7 @@ void print_guide()
     printf("./mini-dig <server> <domain> <type>.\n");
     printf("<server> - IPv4 адрес DNS-сервера, которому будет отправлен запрос. Должен начинаться с символа '@'. Поставьте дифис чтобы был выбран dns-сервер системы (будет прочитан первый из файла /etc/resolv.conf).\n");
     printf("<domain> - domain, о котором нужно найти информацию. Поставьте дефис чтобы был выбран домен example.com\n");
-    printf("<type> - тип запроса. Поддерживаемые типы запроса: A, AAAA, NS. Поставьте дефис чтобы был выбран A.\n");
+    printf("<type> - тип запроса. Поддерживаемые типы запроса: A, AAAA, NS, CNAME, SOA. Поставьте дефис чтобы был выбран A.\n");
     printf("Пример запуска:\n");
     printf("./mini-dig @8.8.8.8 google.com A\n");
 }
